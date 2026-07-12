@@ -32,6 +32,17 @@ On Windows, the same Debian build can be reproduced with Docker:
 docker build --build-arg ZPL_AGENT_GIT_COMMIT=$(git rev-parse HEAD) -t zpl-agent .
 ```
 
+Build only the native 32-bit ARM artifact for a Raspberry Pi 2 on Windows:
+
+```powershell
+./scripts/build-armv7.ps1
+```
+
+The script uses Docker Buildx with `linux/arm/v7`, writes the binary and its
+SHA-256 file to `dist/armv7-local`, and requires no Rust installation on either
+Windows or the Pi. Copy the binary to the Pi and atomically replace
+`/usr/local/bin/zpl-agent`; keep the service running natively under systemd.
+
 Pass the device through only on a Linux Docker host, for example
 `--device=/dev/usb/lp0`. Native systemd deployment is recommended on the
 Raspberry Pi because it simplifies device permissions and mDNS.

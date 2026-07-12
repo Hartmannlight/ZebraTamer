@@ -7,6 +7,9 @@ COPY build.rs ./
 COPY src ./src
 RUN cargo build --locked --release
 
+FROM scratch AS artifact
+COPY --from=build /src/target/release/zpl-agent /zpl-agent
+
 FROM debian:bookworm-slim
 RUN groupadd --system zpl-agent && useradd --system --gid zpl-agent --home-dir /var/lib/zpl-agent zpl-agent \
     && install -d -o zpl-agent -g zpl-agent /var/lib/zpl-agent /etc/zpl-agent
