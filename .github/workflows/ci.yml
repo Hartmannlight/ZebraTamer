@@ -1,0 +1,69 @@
+name: CI
+permissions:
+  contents: read
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --locked
+
+  build:
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - armv7-unknown-linux-gnueabihf
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@cross
+      - run: cross build --locked --release --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          cp target/${{ matrix.target }}/release/zpl-agent zpl-agent-${{ matrix.target }}
+          sha256sum zpl-agent-${{ matrix.target }} > zpl-agent-${{ matrix.target }}.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zpl-agent-${{ matrix.target }}
+          path: |
+            zpl-agent-${{ matrix.target }}
+            zpl-agent-${{ matrix.target }}.sha256
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: zpl-agent-*
+          merge-multiple: true
+      - name: Metadata
+        run: |
+          printf '%s\n' "${GITHUB_REF_NAME}" > VERSION
+          printf '%s\n' "${GITHUB_SHA}" > COMMIT
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            zpl-agent-*
+            install.sh
+            config.example.toml
+            packaging/zpl-agent.service
+            packaging/70-zpl-agent-device.rules
+            packaging/zpl-agent.modules.conf
+            VERSION
+            COMMIT

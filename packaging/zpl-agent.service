@@ -1,0 +1,28 @@
+[Unit]
+Description=ZPL printer REST agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zpl-agent
+Group=zpl-agent
+ExecStart=/usr/local/bin/zpl-agent --config /etc/zpl-agent/config.toml
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/zpl-agent
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

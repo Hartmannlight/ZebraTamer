@@ -1,0 +1,3 @@
+# Grant the dedicated service account access to Linux printer character devices.
+# No stable alias is created; zpl-agent opens the configured /dev/usb/lpN directly.
+SUBSYSTEM=="usbmisc", KERNEL=="lp[0-9]*", GROUP="zpl-agent", MODE="0660"

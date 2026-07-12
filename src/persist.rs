@@ -1,0 +1,294 @@
+use crate::model::{now, Event, Job, JobState, MediaLedgerEvent, MediaState};
+use anyhow::{Context, Result};
+use serde::{de::DeserializeOwned, Serialize};
+use serde_json::Value;
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{BufRead, BufReader, Write},
+    path::{Path, PathBuf},
+};
+use uuid::Uuid;
+
+#[derive(Clone)]
+pub struct Store {
+    root: PathBuf,
+}
+
+impl Store {
+    pub fn open(root: PathBuf) -> Result<Self> {
+        for dir in ["jobs", "payloads", "printers", "spool"] {
+            fs::create_dir_all(root.join(dir))?;
+        }
+        Ok(Self { root })
+    }
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+    pub fn job_path(&self, id: Uuid) -> PathBuf {
+        self.root.join("jobs").join(format!("{id}.json"))
+    }
+    pub fn payload_path(&self, id: Uuid) -> PathBuf {
+        self.root.join("payloads").join(format!("{id}.zpl"))
+    }
+    pub fn spool_path(&self, id: Uuid) -> PathBuf {
+        self.root.join("spool").join(format!("{id}.part"))
+    }
+    pub fn printer_dir(&self, id: &str) -> PathBuf {
+        self.root.join("printers").join(id)
+    }
+    pub fn save_job(&self, job: &Job) -> Result<()> {
+        atomic_json(&self.job_path(job.id), job)
+    }
+    pub fn load_job(&self, id: Uuid) -> Result<Job> {
+        read_json(&self.job_path(id))
+    }
+    pub fn register_job(&self, id: Uuid) -> Result<()> {
+        append_ndjson(&self.root.join("jobs.ndjson"), &id)
+    }
+    pub fn list_jobs_page(&self, cursor: usize, limit: usize) -> Result<Vec<Job>> {
+        let mut out = Vec::with_capacity(limit.min(256));
+        let index = match File::open(self.root.join("jobs.ndjson")) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+            Err(error) => return Err(error.into()),
+        };
+        for line in BufReader::new(index).lines().skip(cursor) {
+            if out.len() >= limit {
+                break;
+            }
+            let id: Uuid = serde_json::from_str(&line?)?;
+            if let Ok(job) = self.load_job(id) {
+                out.push(job);
+            }
+        }
+        Ok(out)
+    }
+    pub fn recover_jobs(&self) -> Result<Vec<Job>> {
+        let mut queued = Vec::new();
+        for entry in fs::read_dir(self.root.join("jobs"))? {
+            let path = entry?.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(mut job): Result<Job, _> = read_json(&path) else {
+                continue;
+            };
+            if job.state == JobState::Receiving {
+                job.state = JobState::Failed;
+                job.updated_at = now();
+                job.error = Some("agent_restarted_during_upload".into());
+                let _ = fs::remove_file(self.spool_path(job.id));
+                self.save_job(&job)?;
+                continue;
+            }
+            if matches!(
+                job.state,
+                JobState::Writing | JobState::Verifying | JobState::TransportAccepted
+            ) {
+                job.state = JobState::OutcomeUnknown;
+                job.updated_at = now();
+                job.error = Some("agent_restarted_during_delivery".into());
+                self.save_job(&job)?;
+            } else if job.state == JobState::Queued {
+                queued.push(job);
+            }
+        }
+        Ok(queued)
+    }
+    pub fn media_path(&self, printer: &str) -> PathBuf {
+        self.printer_dir(printer).join("media.json")
+    }
+    pub fn load_media(&self, printer: &str) -> Result<Option<MediaState>> {
+        let p = self.media_path(printer);
+        if p.exists() {
+            Ok(Some(read_json(&p)?))
+        } else {
+            Ok(None)
+        }
+    }
+    pub fn save_media(&self, printer: &str, media: &MediaState) -> Result<()> {
+        fs::create_dir_all(self.printer_dir(printer))?;
+        atomic_json(&self.media_path(printer), media)
+    }
+    pub fn append_media_ledger(&self, printer: &str, event: &MediaLedgerEvent) -> Result<()> {
+        append_ndjson(
+            &self.printer_dir(printer).join("media-ledger.ndjson"),
+            event,
+        )
+    }
+    pub fn append_event(&self, event: &Event) -> Result<()> {
+        append_ndjson(&self.root.join("events.ndjson"), event)
+    }
+    pub fn next_event(
+        &self,
+        kind: &str,
+        printer: Option<String>,
+        job: Option<Uuid>,
+        data: Value,
+    ) -> Event {
+        Event {
+            sequence: next_sequence(&self.root.join("events.ndjson")),
+            at: now(),
+            kind: kind.into(),
+            printer_id: printer,
+            job_id: job,
+            data,
+        }
+    }
+    pub fn read_events(
+        &self,
+        cursor: u64,
+        limit: usize,
+        job: Option<Uuid>,
+    ) -> Result<(Vec<Event>, u64)> {
+        read_ndjson_page(
+            &self.root.join("events.ndjson"),
+            cursor,
+            limit,
+            |e: &Event| job.map(|id| e.job_id == Some(id)).unwrap_or(true),
+        )
+    }
+    pub fn boot_id_path(&self) -> PathBuf {
+        self.root.join("boot_id")
+    }
+    pub fn queue_path(&self, printer: &str) -> PathBuf {
+        self.printer_dir(printer).join("queue.json")
+    }
+    pub fn save_queue(&self, printer: &str, queue: &[Uuid]) -> Result<()> {
+        fs::create_dir_all(self.printer_dir(printer))?;
+        atomic_json(&self.queue_path(printer), &queue)
+    }
+    pub fn load_queue(&self, printer: &str) -> Result<Vec<Uuid>> {
+        let p = self.queue_path(printer);
+        if p.exists() {
+            read_json(&p)
+        } else {
+            Ok(vec![])
+        }
+    }
+}
+
+pub fn atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
+    let mut file = OpenOptions::new().create_new(true).write(true).open(&tmp)?;
+    serde_json::to_writer_pretty(&mut file, value)?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&tmp, path).with_context(|| format!("atomic rename to {}", path.display()))?;
+    if let Some(parent) = path.parent() {
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
+    let file = File::open(path)?;
+    Ok(serde_json::from_reader(BufReader::new(file))?)
+}
+
+pub fn append_ndjson<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    serde_json::to_writer(&mut file, value)?;
+    file.write_all(b"\n")?;
+    file.sync_data()?;
+    Ok(())
+}
+
+pub fn sync_parent(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+fn next_sequence(path: &Path) -> u64 {
+    File::open(path)
+        .ok()
+        .map(|f| BufReader::new(f).lines().count() as u64 + 1)
+        .unwrap_or(1)
+}
+
+fn read_ndjson_page<T: DeserializeOwned, F: Fn(&T) -> bool>(
+    path: &Path,
+    cursor: u64,
+    limit: usize,
+    filter: F,
+) -> Result<(Vec<T>, u64)> {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((vec![], cursor)),
+        Err(e) => return Err(e.into()),
+    };
+    let mut out = Vec::with_capacity(limit.min(256));
+    let mut next_cursor = cursor;
+    for (index, line) in BufReader::new(file).lines().enumerate() {
+        if (index as u64) < cursor {
+            continue;
+        }
+        next_cursor = index as u64 + 1;
+        let item: T = serde_json::from_str(&line?)?;
+        if filter(&item) {
+            out.push(item);
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok((out, next_cursor))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn job(state: JobState) -> Job {
+        Job {
+            id: Uuid::new_v4(),
+            printer_id: "p1".into(),
+            state,
+            created_at: now(),
+            updated_at: now(),
+            label_count: None,
+            label_count_source: None,
+            origin: None,
+            description: None,
+            sha256: None,
+            bytes: 42,
+            payload_path: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn recovery_never_requeues_an_in_flight_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let writing = job(JobState::Writing);
+        let queued = job(JobState::Queued);
+        store.save_job(&writing).unwrap();
+        store.save_job(&queued).unwrap();
+        let recovered = store.recover_jobs().unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].id, queued.id);
+        assert_eq!(
+            store.load_job(writing.id).unwrap().state,
+            JobState::OutcomeUnknown
+        );
+    }
+
+    #[test]
+    fn atomic_json_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        atomic_json(&path, &serde_json::json!({"ready":true})).unwrap();
+        let value: Value = read_json(&path).unwrap();
+        assert_eq!(value["ready"], true);
+    }
+}

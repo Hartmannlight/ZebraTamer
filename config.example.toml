@@ -1,0 +1,21 @@
+listen = "0.0.0.0:8080"
+data_dir = "/var/lib/zpl-agent"
+storage_mode = "full"
+mdns_enabled = true
+poll_interval_secs = 30
+capability_poll_interval_secs = 3600
+host_boot_loss_labels = 2
+printer_reconnect_loss_labels = 2
+calibration_loss_labels = 0
+reconnect_debounce_secs = 5
+hardware_counters = "prefer"
+
+[[printers]]
+id = "schildkrote"
+display_name = "Zebra T402 Schildkröte"
+device = "/dev/usb/lp0"
+transport = "char_device"
+model_hint = "Zebra T402"
+first_byte_timeout_ms = 5000
+idle_timeout_ms = 500
+write_timeout_ms = 30000
