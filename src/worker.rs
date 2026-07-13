@@ -19,22 +19,24 @@ use std::{
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-pub const BASE_QUERIES: &[(&str, &[u8])] = &[
-    ("host_status", b"~HS"),
+pub const STATUS_QUERIES: &[(&str, &[u8])] = &[("host_status", b"~HS")];
+pub const INVENTORY_QUERIES: &[(&str, &[u8])] = &[
+    ("identification", b"~HI"),
     ("head_diagnostics", b"~HD"),
     ("memory", b"~HM"),
     ("battery", b"~HB"),
     ("configuration", b"^XA^HH^XZ"),
-    ("directory_r", b"^XA^HWR:*.*^XZ"),
-    ("directory_e", b"^XA^HWE:*.*^XZ"),
-    ("directory_b", b"^XA^HWB:*.*^XZ"),
-    ("directory_z", b"^XA^HWZ:*.*^XZ"),
-];
-pub const OPTIONAL_QUERIES: &[(&str, &[u8])] = &[
-    ("sgd_device", b"! U1 getvar \"device.friendly_name\"\r\n"),
-    ("hq_status", b"~HQES"),
+    ("hq_errors", b"~HQES"),
+    ("hq_head_test", b"~HQJT"),
+    ("hq_maintenance", b"~HQMA"),
+    ("hq_odometer", b"~HQOD"),
+    ("hq_head_life", b"~HQPH"),
+    ("hq_plug_and_play", b"~HQPP"),
+    ("hq_serial", b"~HQSN"),
+    ("hq_usb", b"~HQUI"),
+    ("xml_status", b"^XA^HZr^XZ"),
     (
-        "odometer",
+        "sgd_odometer",
         b"! U1 getvar \"odometer.total_print_length\"\r\n",
     ),
 ];
@@ -234,8 +236,10 @@ fn ensure_transport(
             }
             Err(e) => {
                 let mut s = snapshot.write().unwrap();
-                s.transport.present = Observed::unavailable(e.to_string());
+                s.transport.present = Observed::value(config.device.exists(), None, "os");
                 s.transport.open = Observed::value(false, None, "agent");
+                s.transport.protocol_up = Observed::value(false, None, "probe");
+                s.status.ready = Observed::unavailable(e.to_string());
                 return Err(e.to_string());
             }
         }
@@ -254,14 +258,15 @@ fn probe(
     ensure_transport(config, transport, snapshot)?;
     let t = transport.as_mut().unwrap();
     let mut any = false;
-    for (name, command) in BASE_QUERIES {
+    for (name, command) in STATUS_QUERIES {
         let started = Instant::now();
         match t.query(command, config.first_byte_timeout(), config.idle_timeout()) {
-            Ok(r) => {
+            Ok(r) if !r.bytes.is_empty() => {
                 any = true;
                 record_response(snapshot, name, &r.bytes, r.duration, None, r.classification);
                 parse_known(name, &r.bytes, snapshot);
             }
+            Ok(r) => record_response(snapshot, name, &r.bytes, r.duration, None, r.classification),
             Err(e) => record_response(
                 snapshot,
                 name,
@@ -272,9 +277,31 @@ fn probe(
             ),
         }
     }
+    // Some Zebra models suppress ~HS in particular fault states. A successful
+    // identification response still proves that the bidirectional channel is up.
+    if !any {
+        let name = "identification";
+        let started = Instant::now();
+        match t.query(b"~HI", config.first_byte_timeout(), config.idle_timeout()) {
+            Ok(r) if !r.bytes.is_empty() => {
+                any = true;
+                record_response(snapshot, name, &r.bytes, r.duration, None, r.classification);
+                parse_known(name, &r.bytes, snapshot);
+            }
+            Ok(r) => record_response(snapshot, name, &r.bytes, r.duration, None, r.classification),
+            Err(error) => record_response(
+                snapshot,
+                name,
+                &[],
+                started.elapsed(),
+                Some(error.to_string()),
+                "transport_error".into(),
+            ),
+        }
+    }
     if capability_probe {
-        for (name, command) in OPTIONAL_QUERIES {
-            if *name == "odometer" && hardware_counters == HardwareCounterPolicy::Disabled {
+        for (name, command) in INVENTORY_QUERIES {
+            if *name == "sgd_odometer" && hardware_counters == HardwareCounterPolicy::Disabled {
                 snapshot.write().unwrap().capabilities.insert(
                     (*name).into(),
                     Observed::not_supported("disabled_by_config"),
@@ -284,7 +311,9 @@ fn probe(
             let started = Instant::now();
             match t.query(command, config.first_byte_timeout(), config.idle_timeout()) {
                 Ok(r) if !r.bytes.is_empty() => {
+                    any = true;
                     record_response(snapshot, name, &r.bytes, r.duration, None, r.classification);
+                    parse_known(name, &r.bytes, snapshot);
                     snapshot
                         .write()
                         .unwrap()
@@ -335,22 +364,31 @@ fn probe(
     }
     if capability_probe {
         let mut s = snapshot.write().unwrap();
-        s.counters.manual_feed_detection = match s.capabilities.get("odometer").map(|v| &v.state) {
-            Some(crate::model::ValueState::Value) => {
-                Observed::value(true, None, "capability_probe")
-            }
-            Some(crate::model::ValueState::NotSupported) => {
-                Observed::not_supported("hardware_counter_not_supported")
-            }
-            Some(crate::model::ValueState::Unavailable) => {
-                Observed::unavailable("hardware_counter_probe_unavailable")
-            }
-            _ => Observed::unknown(),
-        };
+        s.counters.manual_feed_detection =
+            match s.capabilities.get("sgd_odometer").map(|v| &v.state) {
+                Some(crate::model::ValueState::Value) => {
+                    Observed::value(true, None, "capability_probe")
+                }
+                Some(crate::model::ValueState::NotSupported) => {
+                    Observed::not_supported("hardware_counter_not_supported")
+                }
+                Some(crate::model::ValueState::Unavailable) => {
+                    Observed::unavailable("hardware_counter_probe_unavailable")
+                }
+                _ => Observed::unknown(),
+            };
     }
     {
         let mut s = snapshot.write().unwrap();
         s.transport.protocol_up = Observed::value(any, None, "probe");
+        if any {
+            s.transport.last_response_at = Observed::value(now(), None, "probe");
+        } else {
+            s.status.ready = Observed::unavailable("printer_did_not_answer_status_query");
+            mark_status_stale(&mut s.status);
+            s.transport.open = Observed::value(false, None, "agent");
+            s.transport.disconnected_at = Observed::value(now(), None, "probe");
+        }
         s.updated_at = now();
         let _ =
             crate::persist::atomic_json(&store.printer_dir(&config.id).join("snapshot.json"), &*s);
@@ -360,6 +398,36 @@ fn probe(
     } else {
         Err("printer did not answer any base query".into())
     }
+}
+
+fn mark_stale<T>(observation: &mut Observed<T>) {
+    if observation.value.is_some() {
+        observation.state = crate::model::ValueState::Stale;
+        observation.reason = Some("printer_offline".into());
+    }
+}
+
+fn mark_status_stale(status: &mut crate::model::StatusSnapshot) {
+    mark_stale(&mut status.ready);
+    mark_stale(&mut status.paused);
+    mark_stale(&mut status.media_out);
+    mark_stale(&mut status.ribbon_out);
+    mark_stale(&mut status.head_open);
+    mark_stale(&mut status.temperature_fault);
+    mark_stale(&mut status.buffer_available_bytes);
+    mark_stale(&mut status.buffer_full);
+    mark_stale(&mut status.print_mode);
+    mark_stale(&mut status.batch_total);
+    mark_stale(&mut status.batch_remaining);
+    mark_stale(&mut status.formats_buffered);
+    mark_stale(&mut status.images_stored);
+    mark_stale(&mut status.partial_format);
+    mark_stale(&mut status.corrupt_configuration);
+    mark_stale(&mut status.cutter_jam);
+    mark_stale(&mut status.cover_open);
+    mark_stale(&mut status.clean_head_warning);
+    mark_stale(&mut status.media_low);
+    mark_stale(&mut status.ribbon_low);
 }
 
 fn record_response(
@@ -396,28 +464,12 @@ fn record_response(
 }
 
 fn parse_known(name: &str, bytes: &[u8], snapshot: &Arc<RwLock<PrinterSnapshot>>) {
-    let text = String::from_utf8_lossy(bytes);
     let mut s = snapshot.write().unwrap();
-    if name == "host_status" {
-        let parts: Vec<&str> = text.split(',').collect();
-        if parts.len() > 2 {
-            s.status.ready = Observed::value(true, None, "~HS");
-            s.status.paused = Observed::value(
-                parts.get(2).map(|v| v.trim() == "1").unwrap_or(false),
-                None,
-                "~HS",
-            );
-        }
-    }
-    if name == "configuration" {
-        for line in text.lines() {
-            let l = line.trim();
-            if l.to_ascii_lowercase().contains("firmware") {
-                s.identity.firmware = Observed::value(l.to_string(), None, "^HH");
-            }
-            if l.to_ascii_lowercase().contains("zebra") {
-                s.identity.model = Observed::value(l.to_string(), None, "^HH");
-            }
+    if let Err(error) = crate::parser::parse(name, bytes, &mut s) {
+        let stats = s.query_stats.entry(name.into()).or_default();
+        stats.parse_errors = stats.parse_errors.saturating_add(1);
+        if let Some(raw) = s.raw_responses.get_mut(name) {
+            raw.error = Some(format!("parse_error:{error}"));
         }
     }
 }
@@ -437,17 +489,14 @@ fn process_job(
     job.updated_at = now();
     let _ = store.save_job(&job);
     emit(store, "job_writing", config, id, json!({}));
-    let result = ensure_transport(config, transport, snapshot).and_then(|_| {
-        let path = job
-            .payload_path
-            .as_ref()
-            .ok_or("payload_missing".to_string())?;
-        transport
-            .as_mut()
-            .unwrap()
-            .write_file(path)
-            .map_err(|e| e.to_string())
-    });
+    // Close a possible read/write query descriptor first. Print jobs use a
+    // separate fresh write-only descriptor, matching the raw printer path.
+    *transport = None;
+    let result = job
+        .payload_path
+        .as_ref()
+        .ok_or("payload_missing".to_string())
+        .and_then(|path| CharDeviceTransport::write_file(config, path).map_err(|e| e.to_string()));
     match result {
         Ok(bytes) => {
             job.state = JobState::TransportAccepted;
@@ -458,7 +507,7 @@ fn process_job(
                 "job_transport_accepted",
                 config,
                 id,
-                json!({"bytes":bytes}),
+                json!({ "bytes": bytes }),
             );
             consume_media(store, config, &job);
             if storage == StorageMode::MetadataOnly {

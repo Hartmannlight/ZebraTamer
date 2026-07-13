@@ -3,6 +3,7 @@ mod config;
 mod mdns;
 mod metrics;
 mod model;
+mod parser;
 mod persist;
 mod transport;
 mod worker;

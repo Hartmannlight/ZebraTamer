@@ -110,6 +110,8 @@ pub struct PrinterSnapshot {
     pub diagnostics: DiagnosticsSnapshot,
     pub memory: MemorySnapshot,
     pub counters: CounterSnapshot,
+    pub maintenance: MaintenanceSnapshot,
+    pub interfaces: InterfaceSnapshot,
     pub media: Observed<MediaState>,
     pub jobs: JobSummary,
     pub capabilities: BTreeMap<String, Observed<bool>>,
@@ -131,7 +133,10 @@ obs_struct!(IdentitySnapshot {
     firmware: String,
     hardware_id: String,
     serial_number: String,
-    resolution_dpi: u64
+    resolution_dpi: u64,
+    dots_per_mm: u64,
+    command_language: String,
+    manufacturer: String
 });
 obs_struct!(StatusSnapshot {
     ready: bool,
@@ -141,8 +146,19 @@ obs_struct!(StatusSnapshot {
     head_open: bool,
     temperature_fault: bool,
     buffer_available_bytes: u64,
+    buffer_full: bool,
     print_mode: String,
-    batch_remaining: u64
+    batch_total: u64,
+    batch_remaining: u64,
+    formats_buffered: u64,
+    images_stored: u64,
+    partial_format: bool,
+    corrupt_configuration: bool,
+    cutter_jam: bool,
+    cover_open: bool,
+    clean_head_warning: bool,
+    media_low: bool,
+    ribbon_low: bool
 });
 obs_struct!(SettingsSnapshot {
     darkness: f64,
@@ -151,9 +167,16 @@ obs_struct!(SettingsSnapshot {
     backfeed_speed: f64,
     label_length_dots: u64,
     print_width_dots: u64,
+    maximum_length_dots: u64,
     label_top_dots: i64,
     x_offset_dots: i64,
     y_offset_dots: i64,
+    tear_off_dots: i64,
+    media_type: String,
+    sensor_type: String,
+    sensor_select: String,
+    print_technology: String,
+    zpl_mode: String,
     format_prefix: String,
     control_prefix: String,
     delimiter: String,
@@ -162,6 +185,9 @@ obs_struct!(SettingsSnapshot {
 obs_struct!(DiagnosticsSnapshot {
     head_test: String,
     temperature_celsius: f64,
+    overtemp_threshold_celsius: f64,
+    undertemp_threshold_celsius: f64,
+    head_element_failed: bool,
     sensor_values: Value,
     voltage_raw: Value,
     pitch_values: Value
@@ -169,15 +195,35 @@ obs_struct!(DiagnosticsSnapshot {
 obs_struct!(MemorySnapshot {
     ram_free_bytes: u64,
     ram_total_bytes: u64,
+    ram_maximum_free_bytes: u64,
     flash_free_bytes: u64,
     flash_total_bytes: u64,
     other: Value
 });
 obs_struct!(CounterSnapshot {
     odometer: u64,
+    odometer_meters: f64,
+    resettable_counter_1_meters: f64,
+    resettable_counter_2_meters: f64,
     labels_printed: u64,
     marker_count: u64,
     manual_feed_detection: bool
+});
+obs_struct!(MaintenanceSnapshot {
+    last_cleaned_meters: f64,
+    head_usage_meters: f64,
+    head_replacement_interval_meters: f64,
+    media_replaced: u64,
+    ribbon_replaced: u64,
+    head_cleaned: u64,
+    replacement_alert: bool,
+    cleaning_alert: bool
+});
+obs_struct!(InterfaceSnapshot {
+    usb_connected: bool,
+    usb_product_id: String,
+    usb_release_version: String,
+    communication_type: String
 });
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -191,7 +237,7 @@ pub struct JobSummary {
 impl PrinterSnapshot {
     pub fn new(id: String) -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             printer_id: id,
             transport: Default::default(),
             identity: Default::default(),
@@ -200,6 +246,8 @@ impl PrinterSnapshot {
             diagnostics: Default::default(),
             memory: Default::default(),
             counters: Default::default(),
+            maintenance: Default::default(),
+            interfaces: Default::default(),
             media: Observed::unknown(),
             jobs: Default::default(),
             capabilities: BTreeMap::new(),
@@ -226,6 +274,7 @@ pub struct QueryStats {
     pub duration_ms_total: u64,
     pub response_bytes_total: u64,
     pub timeouts: u64,
+    pub parse_errors: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

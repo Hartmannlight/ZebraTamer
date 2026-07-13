@@ -9,6 +9,9 @@ printer_reconnect_loss_labels = 2
 calibration_loss_labels = 0
 reconnect_debounce_secs = 5
 hardware_counters = "disabled"
+auto_discover = true
+auto_discover_dir = "/dev/usb"
+auto_discover_id_prefix = "usb"
 
 [[printers]]
 id = "schildkrote"

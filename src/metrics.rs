@@ -1,7 +1,4 @@
-use crate::{
-    api::AppState,
-    model::{AccountingConfidence, ValueState},
-};
+use crate::{api::AppState, model::AccountingConfidence};
 use std::fmt::Write;
 
 pub fn render(state: &AppState) -> String {
@@ -24,25 +21,28 @@ pub fn render(state: &AppState) -> String {
     for (id, w) in state.workers.iter() {
         let s = w.snapshot.read().unwrap();
         let p = esc(id);
-        metric(
+        observed_bool(
             &mut out,
             "zpl_printer_present",
             &p,
-            bool_obs(&s.transport.present),
+            "transport_present",
+            &s.transport.present,
         );
-        metric(
+        observed_bool(
             &mut out,
             "zpl_printer_open",
             &p,
-            bool_obs(&s.transport.open),
+            "transport_open",
+            &s.transport.open,
         );
-        metric(
+        observed_bool(
             &mut out,
             "zpl_printer_protocol_up",
             &p,
-            bool_obs(&s.transport.protocol_up),
+            "protocol_up",
+            &s.transport.protocol_up,
         );
-        metric(&mut out, "zpl_printer_ready", &p, bool_obs(&s.status.ready));
+        observed_bool(&mut out, "zpl_printer_ready", &p, "ready", &s.status.ready);
         metric(
             &mut out,
             "zpl_printer_job_queue_depth",
@@ -56,18 +56,161 @@ pub fn render(state: &AppState) -> String {
             "head_open",
             "temperature",
         ] {
-            let value = match fault {
-                "paused" => bool_obs(&s.status.paused),
-                "media_out" => bool_obs(&s.status.media_out),
-                "ribbon_out" => bool_obs(&s.status.ribbon_out),
-                "head_open" => bool_obs(&s.status.head_open),
-                _ => bool_obs(&s.status.temperature_fault),
+            let observation = match fault {
+                "paused" => &s.status.paused,
+                "media_out" => &s.status.media_out,
+                "ribbon_out" => &s.status.ribbon_out,
+                "head_open" => &s.status.head_open,
+                _ => &s.status.temperature_fault,
             };
-            let _ = writeln!(
-                out,
-                "zpl_printer_fault{{printer=\"{p}\",fault=\"{fault}\"}} {value}"
-            );
+            observation_state(&mut out, &p, fault, observation);
+            if let Some(value) = known_bool(observation) {
+                let _ = writeln!(
+                    out,
+                    "zpl_printer_fault{{printer=\"{p}\",fault=\"{fault}\"}} {}",
+                    if value { 1 } else { 0 }
+                );
+            }
         }
+        for (name, observation) in [
+            ("buffer_full", &s.status.buffer_full),
+            ("cutter_jam", &s.status.cutter_jam),
+            ("cover_open", &s.status.cover_open),
+            ("clean_head_warning", &s.status.clean_head_warning),
+            ("media_low", &s.status.media_low),
+            ("ribbon_low", &s.status.ribbon_low),
+        ] {
+            observation_state(&mut out, &p, name, observation);
+            if let Some(value) = known_bool(observation) {
+                let _ = writeln!(
+                    out,
+                    "zpl_printer_fault{{printer=\"{p}\",fault=\"{name}\"}} {}",
+                    if value { 1 } else { 0 }
+                );
+            }
+        }
+        let model = esc(s.identity.model.value.as_deref().unwrap_or("unknown"));
+        let firmware = esc(s.identity.firmware.value.as_deref().unwrap_or("unknown"));
+        let serial = esc(s
+            .identity
+            .serial_number
+            .value
+            .as_deref()
+            .unwrap_or("unknown"));
+        let resolution = s.identity.resolution_dpi.value.unwrap_or(0);
+        let _ = writeln!(
+            out,
+            "zpl_printer_info{{printer=\"{p}\",model=\"{model}\",firmware=\"{firmware}\",serial_number=\"{serial}\",resolution_dpi=\"{resolution}\"}} 1"
+        );
+        numeric_metric(
+            &mut out,
+            "zpl_printer_head_temperature_celsius",
+            &p,
+            &s.diagnostics.temperature_celsius,
+        );
+        numeric_metric(&mut out, "zpl_printer_darkness", &p, &s.settings.darkness);
+        numeric_metric(
+            &mut out,
+            "zpl_printer_print_speed_ips",
+            &p,
+            &s.settings.print_speed,
+        );
+        integer_metric(
+            &mut out,
+            "zpl_printer_label_length_dots",
+            &p,
+            &s.settings.label_length_dots,
+        );
+        integer_metric(
+            &mut out,
+            "zpl_printer_print_width_dots",
+            &p,
+            &s.settings.print_width_dots,
+        );
+        integer_metric(
+            &mut out,
+            "zpl_printer_memory_total_bytes",
+            &p,
+            &s.memory.ram_total_bytes,
+        );
+        integer_metric(
+            &mut out,
+            "zpl_printer_memory_free_bytes",
+            &p,
+            &s.memory.ram_free_bytes,
+        );
+        integer_metric(
+            &mut out,
+            "zpl_printer_flash_total_bytes",
+            &p,
+            &s.memory.flash_total_bytes,
+        );
+        integer_metric(
+            &mut out,
+            "zpl_printer_flash_free_bytes",
+            &p,
+            &s.memory.flash_free_bytes,
+        );
+        numeric_metric(
+            &mut out,
+            "zpl_printer_odometer_meters",
+            &p,
+            &s.counters.odometer_meters,
+        );
+        integer_metric(
+            &mut out,
+            "zpl_printer_labels_printed",
+            &p,
+            &s.counters.labels_printed,
+        );
+        integer_metric(
+            &mut out,
+            "zpl_printer_batch_remaining",
+            &p,
+            &s.status.batch_remaining,
+        );
+        integer_metric(
+            &mut out,
+            "zpl_printer_formats_buffered",
+            &p,
+            &s.status.formats_buffered,
+        );
+        integer_metric(
+            &mut out,
+            "zpl_printer_images_stored",
+            &p,
+            &s.status.images_stored,
+        );
+        numeric_metric(
+            &mut out,
+            "zpl_printer_head_usage_meters",
+            &p,
+            &s.maintenance.head_usage_meters,
+        );
+        numeric_metric(
+            &mut out,
+            "zpl_printer_last_cleaned_meters",
+            &p,
+            &s.maintenance.last_cleaned_meters,
+        );
+        integer_metric(
+            &mut out,
+            "zpl_printer_media_replaced",
+            &p,
+            &s.maintenance.media_replaced,
+        );
+        integer_metric(
+            &mut out,
+            "zpl_printer_ribbon_replaced",
+            &p,
+            &s.maintenance.ribbon_replaced,
+        );
+        integer_metric(
+            &mut out,
+            "zpl_printer_head_cleaned",
+            &p,
+            &s.maintenance.head_cleaned,
+        );
         for (cap, v) in &s.capabilities {
             for state_name in [
                 "value",
@@ -112,6 +255,11 @@ pub fn render(state: &AppState) -> String {
                 "zpl_printer_query_timeouts_total{{printer=\"{p}\",query=\"{query}\"}} {}",
                 stats.timeouts
             );
+            let _ = writeln!(
+                out,
+                "zpl_printer_query_parse_errors_total{{printer=\"{p}\",query=\"{query}\"}} {}",
+                stats.parse_errors
+            );
         }
         if let Ok(Some(m)) = state.store.load_media(id) {
             let _ = writeln!(
@@ -155,11 +303,82 @@ pub fn render(state: &AppState) -> String {
 fn metric(out: &mut String, name: &str, p: &str, value: f64) {
     let _ = writeln!(out, "{name}{{printer=\"{p}\"}} {value}");
 }
-fn bool_obs(v: &crate::model::Observed<bool>) -> f64 {
-    if v.state == ValueState::Value && v.value == Some(true) {
-        1.0
-    } else {
-        0.0
+fn known_bool(v: &crate::model::Observed<bool>) -> Option<bool> {
+    (v.state == crate::model::ValueState::Value)
+        .then_some(v.value)
+        .flatten()
+}
+fn state_name(state: &crate::model::ValueState) -> &'static str {
+    match state {
+        crate::model::ValueState::Value => "value",
+        crate::model::ValueState::Stale => "stale",
+        crate::model::ValueState::NotSupported => "not_supported",
+        crate::model::ValueState::Unavailable => "unavailable",
+        crate::model::ValueState::Unknown => "unknown",
+        crate::model::ValueState::NotConfigured => "not_configured",
+    }
+}
+fn observation_state<T>(
+    out: &mut String,
+    printer: &str,
+    field: &str,
+    observation: &crate::model::Observed<T>,
+) {
+    let current = state_name(&observation.state);
+    for state in [
+        "value",
+        "stale",
+        "not_supported",
+        "unavailable",
+        "unknown",
+        "not_configured",
+    ] {
+        let _ = writeln!(
+            out,
+            "zpl_printer_observation_state{{printer=\"{printer}\",field=\"{}\",state=\"{state}\"}} {}",
+            esc(field),
+            if current == state { 1 } else { 0 }
+        );
+    }
+}
+fn observed_bool(
+    out: &mut String,
+    name: &str,
+    printer: &str,
+    field: &str,
+    observation: &crate::model::Observed<bool>,
+) {
+    observation_state(out, printer, field, observation);
+    if let Some(value) = known_bool(observation) {
+        metric(out, name, printer, if value { 1.0 } else { 0.0 });
+    }
+}
+fn numeric_metric(
+    out: &mut String,
+    name: &str,
+    printer: &str,
+    observation: &crate::model::Observed<f64>,
+) {
+    observation_state(out, printer, name, observation);
+    if let Some(value) = observation
+        .value
+        .filter(|_| observation.state == crate::model::ValueState::Value)
+    {
+        metric(out, name, printer, value);
+    }
+}
+fn integer_metric(
+    out: &mut String,
+    name: &str,
+    printer: &str,
+    observation: &crate::model::Observed<u64>,
+) {
+    observation_state(out, printer, name, observation);
+    if let Some(value) = observation
+        .value
+        .filter(|_| observation.state == crate::model::ValueState::Value)
+    {
+        metric(out, name, printer, value as f64);
     }
 }
 fn esc(s: &str) -> String {
@@ -168,6 +387,7 @@ fn esc(s: &str) -> String {
         .replace('\n', "\\n")
 }
 #[cfg(target_os = "linux")]
+#[allow(clippy::unnecessary_cast)] // libc uses different statvfs field widths across Pi targets.
 fn filesystem_free(path: &std::path::Path) -> u64 {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;

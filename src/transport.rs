@@ -22,12 +22,10 @@ pub trait PrinterTransport: Send {
         first_byte: Duration,
         idle: Duration,
     ) -> Result<QueryResponse>;
-    fn write_file(&mut self, path: &Path) -> Result<u64>;
 }
 
 pub struct CharDeviceTransport {
     device: File,
-    write_timeout: Duration,
 }
 
 impl CharDeviceTransport {
@@ -38,10 +36,33 @@ impl CharDeviceTransport {
             .custom_flags(libc::O_NONBLOCK)
             .open(&config.device)
             .with_context(|| format!("opening char device {}", config.device.display()))?;
-        Ok(Self {
-            device,
-            write_timeout: Duration::from_millis(config.write_timeout_ms),
-        })
+        Ok(Self { device })
+    }
+
+    /// Send one raw job with a fresh write-only file descriptor.
+    ///
+    /// Querying needs a read/write descriptor, but USB-to-parallel bridges can
+    /// be sensitive to one remaining open while a print job starts. Keeping
+    /// the job path separate reproduces the established open/write/close raw
+    /// delivery pattern while the agent remains the sole process with access.
+    pub fn write_file(config: &PrinterConfig, path: &Path) -> Result<u64> {
+        let mut output = OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NOCTTY)
+            .open(&config.device)
+            .with_context(|| format!("opening printer for write {}", config.device.display()))?;
+        let mut source = File::open(path)?;
+        let mut total = 0;
+        let mut chunk = [0u8; 16 * 1024];
+        loop {
+            let n = source.read(&mut chunk)?;
+            if n == 0 {
+                break;
+            }
+            output.write_all(&chunk[..n])?;
+            total += n as u64;
+        }
+        Ok(total)
     }
 }
 
@@ -76,21 +97,6 @@ impl PrinterTransport for CharDeviceTransport {
             duration: started.elapsed(),
             classification,
         })
-    }
-
-    fn write_file(&mut self, path: &Path) -> Result<u64> {
-        let mut source = File::open(path)?;
-        let mut total = 0;
-        let mut chunk = [0u8; 16 * 1024];
-        loop {
-            let n = source.read(&mut chunk)?;
-            if n == 0 {
-                break;
-            }
-            write_all_nonblocking(&mut self.device, &chunk[..n], self.write_timeout)?;
-            total += n as u64;
-        }
-        Ok(total)
     }
 }
 
@@ -154,10 +160,7 @@ mod tests {
         let (client, mut printer) = UnixStream::pair().unwrap();
         client.set_nonblocking(true).unwrap();
         let file = unsafe { File::from_raw_fd(client.into_raw_fd()) };
-        let mut transport = CharDeviceTransport {
-            device: file,
-            write_timeout: Duration::from_secs(1),
-        };
+        let mut transport = CharDeviceTransport { device: file };
         let simulator = thread::spawn(move || {
             let mut command = [0u8; 3];
             printer.read_exact(&mut command).unwrap();

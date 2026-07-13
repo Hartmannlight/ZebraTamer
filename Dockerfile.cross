@@ -1,0 +1,14 @@
+# Rust and cargo run natively on the x86_64 Docker host.  Only the final link
+# step targets ARMv7, avoiding the QEMU emulation used by Buildx platform builds.
+FROM rust:1-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        gcc-arm-linux-gnueabihf \
+        libc6-dev-armhf-cross \
+    && rustup target add armv7-unknown-linux-gnueabihf \
+    && rustup component add rustfmt \
+    && rustup component add clippy \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc
