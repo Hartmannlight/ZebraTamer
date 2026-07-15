@@ -31,7 +31,7 @@ curl -fsSL https://github.com/Hartmannlight/ZebraTamer/releases/latest/download/
 curl -fsSL https://github.com/Hartmannlight/ZebraTamer/releases/latest/download/install.sh | sudo sh -s -- --profile zero2w
 ```
 
-Push a tag such as `v0.2.0` to publish both `armv7-unknown-linux-gnueabihf`
+Push a tag such as `v0.2.1` to publish both `armv7-unknown-linux-gnueabihf`
 and `aarch64-unknown-linux-gnu` binaries to GitHub Releases automatically.
 
 Review `/etc/zpl-agent/config.toml` and the udev rule afterward. The example opens
@@ -80,6 +80,18 @@ Pi OS:
 The result is `dist/arm64-local/zpl-agent`. See `deploy/pi-zero-2w/` for the
 LP 2824 Plus configuration and the `kuche-pi` F16 integration.
 
+## Grafana
+
+An importable, host- and printer-independent dashboard is available at
+[`grafana/zebra-printers.json`](grafana/zebra-printers.json). Together with the
+`pi-init` textfile collector, the API and print endpoint can remain bound to
+localhost while the central Prometheus receives system and Zebra metrics from
+the Node Exporter on port `9100`.
+
+The **Pi** and **Printer** variables are populated from the common `host` target
+label and the `printer` metric label. Newly registered hosts and printers appear
+without creating or copying a dashboard.
+
 ## API notes
 
 All API results use the versioned envelope. Job bodies with
@@ -99,3 +111,9 @@ The frequent poll sends only `~HS`. Startup and the slower capability poll use
 odometer fallback. Large directory/XML dumps and `allcv` are deliberately not
 polled. Optional commands are reported as supported only after a response; an
 offline timeout remains `unavailable`, not `not_supported`.
+
+Set `bidirectional_queries = false` for print-only USB-to-parallel paths that
+become unstable after reverse-channel queries. The API then reports live status
+fields as unavailable while presence, job delivery, queues, and metrics remain
+usable. Raw job writes are nonblocking and honor `write_timeout_ms`, so a stalled
+adapter cannot hold a printer worker forever.
