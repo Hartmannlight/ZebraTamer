@@ -19,6 +19,7 @@ display_name = "Zebra T402 Schildkröte"
 device = "/dev/usb/lp0"
 transport = "char_device"
 model_hint = "Zebra T402"
+bidirectional_queries = true
 first_byte_timeout_ms = 5000
 idle_timeout_ms = 500
 write_timeout_ms = 30000

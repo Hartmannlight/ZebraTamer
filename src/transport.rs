@@ -48,18 +48,23 @@ impl CharDeviceTransport {
     pub fn write_file(config: &PrinterConfig, path: &Path) -> Result<u64> {
         let mut output = OpenOptions::new()
             .write(true)
-            .custom_flags(libc::O_NOCTTY)
+            .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
             .open(&config.device)
             .with_context(|| format!("opening printer for write {}", config.device.display()))?;
         let mut source = File::open(path)?;
         let mut total = 0;
-        let mut chunk = [0u8; 16 * 1024];
+        let deadline = Instant::now() + config.write_timeout();
+        let mut chunk = [0u8; 4 * 1024];
         loop {
             let n = source.read(&mut chunk)?;
             if n == 0 {
                 break;
             }
-            output.write_all(&chunk[..n])?;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                anyhow::bail!("write_timeout");
+            }
+            write_all_nonblocking(&mut output, &chunk[..n], remaining)?;
             total += n as u64;
         }
         Ok(total)
@@ -181,5 +186,16 @@ mod tests {
         simulator.join().unwrap();
         assert_eq!(answer.bytes, b"firstsecond");
         assert!(answer.duration >= Duration::from_millis(140));
+    }
+
+    #[test]
+    fn nonblocking_write_honors_timeout() {
+        let (client, _printer) = UnixStream::pair().unwrap();
+        client.set_nonblocking(true).unwrap();
+        let mut file = unsafe { File::from_raw_fd(client.into_raw_fd()) };
+        let payload = vec![0u8; 4 * 1024 * 1024];
+        let error = write_all_nonblocking(&mut file, &payload, Duration::from_millis(10))
+            .expect_err("an unread socket must eventually stop accepting bytes");
+        assert!(error.to_string().contains("write_timeout"));
     }
 }

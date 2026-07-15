@@ -72,6 +72,9 @@ impl WorkerHandle {
         self.request_probe(false).await
     }
     async fn request_probe(&self, capabilities: bool) -> Result<(), String> {
+        if !self.config.bidirectional_queries {
+            return Err("bidirectional_queries_disabled".to_string());
+        }
         let (tx, rx) = oneshot::channel();
         self.tx
             .try_send(Command::Probe {
@@ -105,6 +108,12 @@ pub fn spawn(
     let mut initial_snapshot = PrinterSnapshot::new(config.id.clone());
     if let Some(model) = config.model_hint.clone() {
         initial_snapshot.identity.model = Observed::value(model, None, "config_hint");
+    }
+    initial_snapshot.transport.present = Observed::value(config.device.exists(), None, "os");
+    if !config.bidirectional_queries {
+        initial_snapshot.transport.protocol_up =
+            Observed::unavailable("bidirectional_queries_disabled");
+        initial_snapshot.status.ready = Observed::unavailable("bidirectional_queries_disabled");
     }
     let snapshot_tx = Arc::new(RwLock::new(initial_snapshot));
     let shared = snapshot_tx.clone();

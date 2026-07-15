@@ -177,6 +177,7 @@ pub struct PrinterConfig {
     pub device: PathBuf,
     pub transport: String,
     pub model_hint: Option<String>,
+    pub bidirectional_queries: bool,
     pub first_byte_timeout_ms: u64,
     pub idle_timeout_ms: u64,
     pub write_timeout_ms: u64,
@@ -190,6 +191,7 @@ impl Default for PrinterConfig {
             device: PathBuf::new(),
             transport: "char_device".into(),
             model_hint: None,
+            bidirectional_queries: true,
             first_byte_timeout_ms: 3000,
             idle_timeout_ms: 300,
             write_timeout_ms: 30_000,
@@ -203,6 +205,9 @@ impl PrinterConfig {
     }
     pub fn idle_timeout(&self) -> Duration {
         Duration::from_millis(self.idle_timeout_ms)
+    }
+    pub fn write_timeout(&self) -> Duration {
+        Duration::from_millis(self.write_timeout_ms)
     }
 }
 
@@ -240,5 +245,13 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn bidirectional_queries_default_on_and_can_be_disabled() {
+        let default: PrinterConfig = toml::from_str("").unwrap();
+        let disabled: PrinterConfig = toml::from_str("bidirectional_queries = false").unwrap();
+        assert!(default.bidirectional_queries);
+        assert!(!disabled.bidirectional_queries);
     }
 }
