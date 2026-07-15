@@ -67,6 +67,11 @@ impl CharDeviceTransport {
             write_all_nonblocking(&mut output, &chunk[..n], remaining)?;
             total += n as u64;
         }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            anyhow::bail!("write_drain_timeout");
+        }
+        drain_nonblocking_write(&output, remaining)?;
         Ok(total)
     }
 }
@@ -137,6 +142,39 @@ fn write_all_nonblocking(file: &mut File, mut data: &[u8], timeout: Duration) ->
     Ok(())
 }
 
+/// Wait until an asynchronous usblp write has really left the kernel before
+/// closing its file descriptor.
+///
+/// usblp deliberately lets an O_NONBLOCK write return while the final USB URB
+/// is still pending. Its release handler kills pending URBs, so close(2) at
+/// that point silently truncates the printer stream. The kernel documents two
+/// valid drain mechanisms: poll for POLLOUT, or clear O_NONBLOCK and issue a
+/// zero-length write. Use both so the close that follows cannot cancel data.
+fn drain_nonblocking_write(file: &File, timeout: Duration) -> Result<()> {
+    let fd = file.as_raw_fd();
+    if !poll_fd(fd, libc::POLLOUT, timeout)? {
+        anyhow::bail!("write_drain_timeout");
+    }
+
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error()).context("reading printer descriptor flags");
+    }
+    if flags & libc::O_NONBLOCK != 0 {
+        let result = unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) };
+        if result < 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("switching printer descriptor to blocking mode");
+        }
+    }
+
+    let result = unsafe { libc::write(fd, std::ptr::null(), 0) };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error()).context("draining printer write");
+    }
+    Ok(())
+}
+
 fn classify(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes).to_ascii_lowercase();
     if text.trim().is_empty() {
@@ -197,5 +235,51 @@ mod tests {
         let error = write_all_nonblocking(&mut file, &payload, Duration::from_millis(10))
             .expect_err("an unread socket must eventually stop accepting bytes");
         assert!(error.to_string().contains("write_timeout"));
+    }
+
+    fn fill_nonblocking_socket(file: &mut File) {
+        let chunk = [0u8; 64 * 1024];
+        loop {
+            match file.write(&chunk) {
+                Ok(0) => panic!("socket accepted zero bytes"),
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return,
+                Err(error) => panic!("filling socket failed: {error}"),
+            }
+        }
+    }
+
+    #[test]
+    fn final_nonblocking_write_must_drain_before_close() {
+        let (client, mut printer) = UnixStream::pair().unwrap();
+        client.set_nonblocking(true).unwrap();
+        let mut file = unsafe { File::from_raw_fd(client.into_raw_fd()) };
+        fill_nonblocking_socket(&mut file);
+
+        let reader = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(40));
+            let mut received = vec![0u8; 1024 * 1024];
+            printer.read(&mut received).unwrap()
+        });
+        let started = Instant::now();
+        drain_nonblocking_write(&file, Duration::from_secs(1)).unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(30));
+        assert!(reader.join().unwrap() > 0);
+
+        let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert_eq!(flags & libc::O_NONBLOCK, 0);
+    }
+
+    #[test]
+    fn final_nonblocking_write_drain_honors_timeout() {
+        let (client, _printer) = UnixStream::pair().unwrap();
+        client.set_nonblocking(true).unwrap();
+        let mut file = unsafe { File::from_raw_fd(client.into_raw_fd()) };
+        fill_nonblocking_socket(&mut file);
+
+        let error = drain_nonblocking_write(&file, Duration::from_millis(10))
+            .expect_err("a full socket must not report a completed drain");
+        assert!(error.to_string().contains("write_drain_timeout"));
     }
 }

@@ -116,4 +116,7 @@ Set `bidirectional_queries = false` for print-only USB-to-parallel paths that
 become unstable after reverse-channel queries. The API then reports live status
 fields as unavailable while presence, job delivery, queues, and metrics remain
 usable. Raw job writes are nonblocking and honor `write_timeout_ms`, so a stalled
-adapter cannot hold a printer worker forever.
+adapter cannot hold a printer worker forever. Before close, the agent waits for
+`POLLOUT`, clears `O_NONBLOCK`, and performs the zero-length write required by
+Linux `usblp`. This prevents close from cancelling the final pending USB URB and
+marks a job `transport_accepted` only after the kernel transfer has drained.
