@@ -1,25 +1,21 @@
 [CmdletBinding()]
 param(
-    [string]$OutputDirectory = "dist/armv7-local"
+    [string]$OutputDirectory = "dist/arm64-local"
 )
 
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $outputPath = [System.IO.Path]::GetFullPath((Join-Path $projectRoot $OutputDirectory))
-$target = "armv7-unknown-linux-gnueabihf"
-$crossImage = "zpl-agent-cross:rust-1-bookworm"
+$target = "aarch64-unknown-linux-gnu"
+$crossImage = "zpl-agent-cross:aarch64-rust-1-bookworm"
 
 New-Item -ItemType Directory -Force -Path $outputPath | Out-Null
 
 Push-Location $projectRoot
 try {
     $commit = (git rev-parse HEAD).Trim()
-
-    # The compiler image is x86_64. Cargo/rustc therefore run natively; the
-    # ARM linker alone produces the Pi binary. Named volumes retain both the
-    # dependency downloads and incremental target artifacts across runs.
-    Write-Host "Preparing native x86_64 -> ARMv7 compiler image..."
-    docker build --file Dockerfile.cross --tag $crossImage .
+    Write-Host "Preparing native x86_64 -> ARM64 compiler image..."
+    docker build --file Dockerfile.cross-aarch64 --tag $crossImage .
     if ($LASTEXITCODE -ne 0) { throw "Unable to prepare cross-compiler image" }
 
     Write-Host "Building zpl-agent for $target (using persistent cache)..."
@@ -28,21 +24,21 @@ try {
         --mount "type=bind,source=$outputPath,target=/out" `
         --mount "type=volume,source=zpl-agent-cargo-registry,target=/usr/local/cargo/registry" `
         --mount "type=volume,source=zpl-agent-cargo-git,target=/usr/local/cargo/git" `
-        --mount "type=volume,source=zpl-agent-armv7-target,target=/target" `
+        --mount "type=volume,source=zpl-agent-arm64-target,target=/target" `
         --workdir /work `
         --env "CARGO_TARGET_DIR=/target" `
         --env "ZPL_AGENT_GIT_COMMIT=$commit" `
         $crossImage `
         bash -c "cargo build --locked --release --target $target && cp /target/$target/release/zpl-agent /out/zpl-agent"
-    if ($LASTEXITCODE -ne 0) { throw "ARMv7 build failed" }
+    if ($LASTEXITCODE -ne 0) { throw "ARM64 build failed" }
 }
 finally {
     Pop-Location
 }
 
 $binary = Join-Path $outputPath "zpl-agent"
+if (-not (Test-Path $binary)) { throw "Build completed without producing $binary" }
 $hash = (Get-FileHash $binary -Algorithm SHA256).Hash.ToLowerInvariant()
 "$hash  zpl-agent" | Set-Content -NoNewline (Join-Path $outputPath "zpl-agent.sha256")
-
 Write-Host "Built $binary"
 Write-Host "SHA-256: $hash"

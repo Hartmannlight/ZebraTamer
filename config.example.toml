@@ -9,6 +9,9 @@ printer_reconnect_loss_labels = 2
 calibration_loss_labels = 0
 reconnect_debounce_secs = 5
 hardware_counters = "prefer"
+auto_discover = true
+auto_discover_dir = "/dev/usb"
+auto_discover_id_prefix = "usb"
 
 [[printers]]
 id = "schildkrote"
@@ -16,6 +19,7 @@ display_name = "Zebra T402 Schildkröte"
 device = "/dev/usb/lp0"
 transport = "char_device"
 model_hint = "Zebra T402"
+bidirectional_queries = true
 first_byte_timeout_ms = 5000
 idle_timeout_ms = 500
 write_timeout_ms = 30000

@@ -6,6 +6,7 @@ use crate::{
         MediaDefinition, MediaLedgerEvent, MediaState, Observed,
     },
     persist::Store,
+    settings::{PrinterSettings, PrinterSettingsRecord},
     worker::WorkerHandle,
 };
 use axum::{
@@ -44,8 +45,13 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/agent", get(agent))
         .route("/v1/printers", get(printers))
         .route("/v1/printers/{id}", get(printer))
+        .route("/v1/printers/{id}/status", get(printer_status))
         .route("/v1/printers/{id}/snapshot", get(snapshot))
         .route("/v1/printers/{id}/capabilities", get(capabilities))
+        .route(
+            "/v1/printers/{id}/settings",
+            get(printer_settings).patch(patch_printer_settings),
+        )
         .route("/v1/printers/{id}/probe", post(probe))
         .route("/v1/printers/{id}/jobs", post(create_job))
         .route("/v1/jobs", get(jobs))
@@ -92,17 +98,35 @@ struct PrinterItem {
     display_name: String,
     transport: String,
     device: String,
+    online: Option<bool>,
+    present: Option<bool>,
+    status_path: String,
+    snapshot_path: String,
 }
 async fn printers(State(s): State<AppState>) -> Json<Envelope<Vec<PrinterItem>>> {
     Json(Envelope::ok(
         s.config
             .printers
             .iter()
-            .map(|p| PrinterItem {
-                id: p.id.clone(),
-                display_name: p.display_name.clone(),
-                transport: p.transport.clone(),
-                device: p.device.display().to_string(),
+            .map(|p| {
+                let snapshot = s
+                    .workers
+                    .get(&p.id)
+                    .map(|worker| worker.snapshot.read().unwrap());
+                PrinterItem {
+                    id: p.id.clone(),
+                    display_name: p.display_name.clone(),
+                    transport: p.transport.clone(),
+                    device: p.device.display().to_string(),
+                    online: snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.transport.protocol_up.value),
+                    present: snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.transport.present.value),
+                    status_path: format!("/v1/printers/{}/status", p.id),
+                    snapshot_path: format!("/v1/printers/{}/snapshot", p.id),
+                }
             })
             .collect(),
     ))
@@ -128,6 +152,21 @@ async fn snapshot(
     let w = worker(&s, &id)?;
     Ok(Json(Envelope::ok(w.snapshot.read().unwrap().clone())))
 }
+async fn printer_status(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Envelope<Value>>, ApiResponseError> {
+    let w = worker(&s, &id)?;
+    let snapshot = w.snapshot.read().unwrap();
+    Ok(Json(Envelope::ok(json!({
+        "printer_id": id,
+        "online": snapshot.transport.protocol_up,
+        "present": snapshot.transport.present,
+        "open": snapshot.transport.open,
+        "status": snapshot.status,
+        "updated_at": snapshot.updated_at
+    }))))
+}
 async fn capabilities(
     State(s): State<AppState>,
     Path(id): Path<String>,
@@ -136,6 +175,58 @@ async fn capabilities(
     Ok(Json(Envelope::ok(json!(
         w.snapshot.read().unwrap().capabilities
     ))))
+}
+
+async fn printer_settings(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Envelope<Value>>, ApiResponseError> {
+    let w = worker(&s, &id)?;
+    let configured = s
+        .store
+        .load_settings(&id)
+        .map_err(ApiResponseError::internal)?;
+    let observed = w.snapshot.read().unwrap().settings.clone();
+    Ok(Json(Envelope::ok(json!({
+        "printer_id": id,
+        "configured": configured,
+        "observed": observed
+    }))))
+}
+
+async fn patch_printer_settings(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(update): Json<PrinterSettings>,
+) -> Result<Json<Envelope<Value>>, ApiResponseError> {
+    update.validate().map_err(ApiResponseError::bad_request)?;
+    let w = worker(&s, &id)?.clone();
+    let settings = s
+        .store
+        .load_settings(&id)
+        .map_err(ApiResponseError::internal)?
+        .map(|record| record.settings.merged_with(update.clone()))
+        .unwrap_or(update);
+    let application = w
+        .apply_settings(settings.clone())
+        .await
+        .map_err(ApiResponseError::unavailable)?;
+    let record = PrinterSettingsRecord {
+        settings,
+        updated_at: application.applied_at,
+        applied_at: application.applied_at,
+        verification: application.verification,
+        mismatches: application.mismatches,
+    };
+    s.store
+        .save_settings(&id, &record)
+        .map_err(ApiResponseError::internal)?;
+    let observed = w.snapshot.read().unwrap().settings.clone();
+    Ok(Json(Envelope::ok(json!({
+        "printer_id": id,
+        "configured": record,
+        "observed": observed
+    }))))
 }
 async fn probe(
     State(s): State<AppState>,
@@ -240,7 +331,7 @@ async fn create_job(
         "job_queued",
         Some(printer_id),
         Some(id),
-        json!({"bytes":bytes}),
+        json!({ "bytes": bytes }),
     );
     s.store
         .append_event(&event)

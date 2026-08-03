@@ -1,0 +1,116 @@
+{
+  "annotations": { "list": [] },
+  "description": "Wiederverwendbare Flottenansicht für ZebraTamer-Drucker.",
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "mappings": [ { "options": { "0": { "color": "red", "text": "Fehler" }, "1": { "color": "green", "text": "OK" } }, "type": "value" } ], "max": 1, "min": 0, "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 8, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "colorMode": "background", "graphMode": "none", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "name" },
+      "targets": [ { "editorMode": "code", "expr": "pi_zpl_agent_scrape_success{host=~\"$host\"}", "instant": true, "legendFormat": "{{host}}", "range": false, "refId": "A" } ],
+      "title": "Metrikabfrage",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "mappings": [ { "options": { "0": { "color": "red", "text": "Fehlt" }, "1": { "color": "green", "text": "Vorhanden" } }, "type": "value" } ], "max": 1, "min": 0, "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 8, "x": 8, "y": 0 },
+      "id": 2,
+      "options": { "colorMode": "background", "graphMode": "none", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "name" },
+      "targets": [ { "editorMode": "code", "expr": "zpl_printer_present{host=~\"$host\",printer=~\"$printer\"}", "instant": true, "legendFormat": "{{host}} / {{printer}}", "range": false, "refId": "A" } ],
+      "title": "Drucker vorhanden",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "mappings": [ { "options": { "0": { "color": "red", "text": "Nicht bereit" }, "1": { "color": "green", "text": "Bereit" } }, "type": "value" } ], "max": 1, "min": 0, "noValue": "Nicht unterstützt", "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 8, "x": 16, "y": 0 },
+      "id": 3,
+      "options": { "colorMode": "background", "graphMode": "none", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "name" },
+      "targets": [ { "editorMode": "code", "expr": "zpl_printer_ready{host=~\"$host\",printer=~\"$printer\"}", "instant": true, "legendFormat": "{{host}} / {{printer}}", "range": false, "refId": "A" } ],
+      "title": "Ready",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "decimals": 0, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 5 } ] } }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 8, "x": 0, "y": 5 },
+      "id": 4,
+      "options": { "colorMode": "value", "graphMode": "area", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [ { "editorMode": "code", "expr": "zpl_printer_job_queue_depth{host=~\"$host\",printer=~\"$printer\"}", "legendFormat": "{{host}} / {{printer}}", "range": true, "refId": "A" } ],
+      "title": "Warteschlange",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "decimals": 0, "noValue": "Nicht konfiguriert", "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "yellow", "value": 25 }, { "color": "green", "value": 100 } ] } }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 8, "x": 8, "y": 5 },
+      "id": 5,
+      "options": { "colorMode": "value", "graphMode": "area", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [ { "editorMode": "code", "expr": "zpl_printer_media_remaining_labels{host=~\"$host\",printer=~\"$printer\"}", "legendFormat": "{{host}} / {{printer}}", "range": true, "refId": "A" } ],
+      "title": "Verbleibende Etiketten",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "decimals": 1, "noValue": "Nicht unterstützt", "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 45 }, { "color": "red", "value": 55 } ] }, "unit": "celsius" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 8, "x": 16, "y": 5 },
+      "id": 6,
+      "options": { "colorMode": "value", "graphMode": "area", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [ { "editorMode": "code", "expr": "zpl_printer_head_temperature_celsius{host=~\"$host\",printer=~\"$printer\"}", "legendFormat": "{{host}} / {{printer}}", "range": true, "refId": "A" } ],
+      "title": "Druckkopftemperatur",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "mappings": [ { "options": { "0": { "color": "green", "text": "OK" }, "1": { "color": "red", "text": "Fehler" } }, "type": "value" } ], "max": 1, "min": 0 }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 10 },
+      "id": 7,
+      "options": { "colorMode": "background", "graphMode": "none", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "name" },
+      "targets": [ { "editorMode": "code", "expr": "zpl_printer_fault{host=~\"$host\",printer=~\"$printer\"}", "instant": true, "legendFormat": "{{host}} / {{printer}}: {{fault}}", "range": false, "refId": "A" } ],
+      "title": "Druckerfehler",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "noValue": "Alle Werte verfügbar" }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 10 },
+      "id": 8,
+      "options": { "showHeader": true },
+      "targets": [ { "editorMode": "code", "expr": "zpl_printer_observation_state{host=~\"$host\",printer=~\"$printer\",state=~\"unavailable|not_supported|stale\"} == 1", "format": "table", "instant": true, "range": false, "refId": "A" } ],
+      "title": "Nicht verfügbare Messwerte",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 16 },
+      "id": 9,
+      "options": { "showHeader": true },
+      "targets": [ { "editorMode": "code", "expr": "zpl_printer_info{host=~\"$host\",printer=~\"$printer\"}", "format": "table", "instant": true, "range": false, "refId": "A" } ],
+      "title": "Druckerinformationen",
+      "type": "table"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["zebra", "zpl", "zebratamer"],
+  "templating": {
+    "list": [
+      { "current": {}, "hide": 0, "includeAll": false, "label": "Prometheus", "multi": false, "name": "datasource", "options": [], "query": "prometheus", "refresh": 1, "regex": "", "type": "datasource" },
+      { "current": { "text": "All", "value": "$__all" }, "datasource": { "type": "prometheus", "uid": "${datasource}" }, "definition": "label_values(zpl_printer_info, host)", "hide": 0, "includeAll": true, "label": "Pi", "multi": true, "name": "host", "options": [], "query": { "query": "label_values(zpl_printer_info, host)", "refId": "PrometheusVariableQueryEditor-VariableQuery" }, "refresh": 1, "regex": "", "sort": 1, "type": "query" },
+      { "current": { "text": "All", "value": "$__all" }, "datasource": { "type": "prometheus", "uid": "${datasource}" }, "definition": "label_values(zpl_printer_info{host=~\"$host\"}, printer)", "hide": 0, "includeAll": true, "label": "Drucker", "multi": true, "name": "printer", "options": [], "query": { "query": "label_values(zpl_printer_info{host=~\"$host\"}, printer)", "refId": "PrometheusVariableQueryEditor-VariableQuery" }, "refresh": 1, "regex": "", "sort": 1, "type": "query" }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "ZebraTamer Drucker",
+  "uid": "zebratamer-printers",
+  "version": 1,
+  "weekStart": "monday"
+}

@@ -13,10 +13,11 @@ install -o root -g root -m 0644 /home/pi/zpl-agent.service /etc/systemd/system/z
 install -o root -g root -m 0644 /home/pi/70-zpl-agent-device.rules /etc/udev/rules.d/70-zpl-agent-device.rules
 install -o root -g root -m 0644 /home/pi/zpl-agent.modules.conf /etc/modules-load.d/zpl-agent.conf
 
-# Undo the former setup-zpl-usb-parallel.sh installation.
-rm -f /etc/udev/rules.d/70-zpl-usb-parallel-schildkrote.rules
-rm -f /etc/modules-load.d/zpl-usblp.conf
+# The audio-button service now submits to the agent API. It must no longer
+# receive a direct printer alias or a separate raw sender.
+rm -f /etc/udev/rules.d/70-zpl-usb-parallel-ente.rules
 rm -f /etc/tmpfiles.d/zpl-lock.conf
+rm -f /etc/modules-load.d/zpl-usblp.conf
 rm -f /usr/local/bin/zpl-send
 rm -rf /run/lock/zpl
 if getent group zplraw >/dev/null; then

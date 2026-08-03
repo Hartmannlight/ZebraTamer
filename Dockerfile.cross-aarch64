@@ -1,0 +1,14 @@
+# Rust and cargo run natively on the x86_64 Docker host. Only the final link
+# step targets 64-bit ARM for a Raspberry Pi Zero 2 W.
+FROM rust:1-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        gcc-aarch64-linux-gnu \
+        libc6-dev-arm64-cross \
+    && rustup target add aarch64-unknown-linux-gnu \
+    && rustup component add rustfmt \
+    && rustup component add clippy \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc

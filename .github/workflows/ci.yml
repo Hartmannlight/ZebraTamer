@@ -56,6 +56,10 @@ jobs:
         run: |
           printf '%s\n' "${GITHUB_REF_NAME}" > VERSION
           printf '%s\n' "${GITHUB_SHA}" > COMMIT
+          cp deploy/pi2/config.toml config-pi2.toml
+          cp deploy/pi-zero-2w/config.toml config-zero2w.toml
+          cp deploy/pi-zero-2w/print-ente-label.py print-ente-label.py
+          cp deploy/pi-zero-2w/audio-buttons-zpl-agent.conf audio-buttons-zpl-agent.conf
       - uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -65,5 +69,9 @@ jobs:
             packaging/zpl-agent.service
             packaging/70-zpl-agent-device.rules
             packaging/zpl-agent.modules.conf
+            config-pi2.toml
+            config-zero2w.toml
+            print-ente-label.py
+            audio-buttons-zpl-agent.conf
             VERSION
             COMMIT

@@ -36,6 +36,10 @@ pub fn announce(config: &Config) -> Result<Option<MdnsGuard>> {
             "snapshot_path".to_string(),
             format!("/v1/printers/{}/snapshot", p.id),
         );
+        props.insert(
+            "status_path".to_string(),
+            format!("/v1/printers/{}/status", p.id),
+        );
         props.insert("metrics_path".to_string(), "/metrics".to_string());
         props.insert("printer_id".to_string(), p.id.clone());
         props.insert("transport".to_string(), p.transport.clone());
