@@ -2,6 +2,7 @@ use crate::{
     config::{HardwareCounterPolicy, PrinterConfig, StorageMode},
     model::{now, JobState, Observed, PrinterSnapshot, RawResponse},
     persist::Store,
+    settings::{PrinterSettings, SettingsApplication, SettingsVerification},
     transport::{CharDeviceTransport, PrinterTransport},
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -46,6 +47,10 @@ enum Command {
         capabilities: bool,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    ApplySettings {
+        settings: PrinterSettings,
+        reply: oneshot::Sender<Result<SettingsApplication, String>>,
+    },
     Enqueue(Uuid),
 }
 
@@ -88,6 +93,19 @@ impl WorkerHandle {
         self.tx
             .try_send(Command::Enqueue(id))
             .map_err(|_| "worker_queue_full".to_string())
+    }
+    pub async fn apply_settings(
+        &self,
+        settings: PrinterSettings,
+    ) -> Result<SettingsApplication, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .try_send(Command::ApplySettings {
+                settings,
+                reply: tx,
+            })
+            .map_err(|_| "worker_queue_full".to_string())?;
+        rx.await.map_err(|_| "worker_stopped".to_string())?
     }
 }
 
@@ -192,9 +210,111 @@ fn run(
                 let _ = store.save_queue(&config.id, queue.make_contiguous());
                 snapshot.write().unwrap().jobs.queue_depth = queue.len() as u64;
             }
+            Ok(Command::ApplySettings { settings, reply }) => {
+                let result = apply_settings(&settings, &config, &store, &snapshot, &mut transport);
+                let _ = reply.send(result);
+            }
             Err(_) => break,
         }
     }
+}
+
+fn apply_settings(
+    settings: &PrinterSettings,
+    config: &PrinterConfig,
+    store: &Store,
+    snapshot: &Arc<RwLock<PrinterSnapshot>>,
+    transport: &mut Option<CharDeviceTransport>,
+) -> Result<SettingsApplication, String> {
+    let command = settings.to_persistent_zpl()?;
+    // A read/write query descriptor must not overlap the write-only settings
+    // transfer on USB-to-parallel adapters.
+    *transport = None;
+    CharDeviceTransport::write_bytes(config, &command).map_err(|error| error.to_string())?;
+
+    let application = if config.bidirectional_queries {
+        match refresh_settings(config, snapshot, transport) {
+            Ok(()) => settings.verify(&snapshot.read().unwrap()),
+            Err(error) => SettingsApplication {
+                applied_at: now(),
+                verification: SettingsVerification::AppliedUnverified,
+                mismatches: vec![format!("verification_unavailable:{error}")],
+            },
+        }
+    } else {
+        SettingsApplication {
+            applied_at: now(),
+            verification: SettingsVerification::AppliedUnverified,
+            mismatches: vec!["bidirectional_queries_disabled".into()],
+        }
+    };
+    let event = store.next_event(
+        "printer_settings_applied",
+        Some(config.id.clone()),
+        None,
+        json!({
+            "verification": application.verification,
+            "mismatches": application.mismatches,
+            "bytes": command.len()
+        }),
+    );
+    let _ = store.append_event(&event);
+    Ok(application)
+}
+
+fn refresh_settings(
+    config: &PrinterConfig,
+    snapshot: &Arc<RwLock<PrinterSnapshot>>,
+    transport: &mut Option<CharDeviceTransport>,
+) -> Result<(), String> {
+    ensure_transport(config, transport, snapshot)?;
+    let printer = transport.as_mut().unwrap();
+    for (name, command) in [
+        ("head_diagnostics", b"~HD".as_slice()),
+        ("configuration", b"^XA^HH^XZ".as_slice()),
+    ] {
+        let started = Instant::now();
+        match printer.query(command, config.first_byte_timeout(), config.idle_timeout()) {
+            Ok(response) if !response.bytes.is_empty() => {
+                record_response(
+                    snapshot,
+                    name,
+                    &response.bytes,
+                    response.duration,
+                    None,
+                    response.classification,
+                );
+                parse_known(name, &response.bytes, snapshot)?;
+            }
+            Ok(response) => {
+                record_response(
+                    snapshot,
+                    name,
+                    &response.bytes,
+                    response.duration,
+                    Some("empty_response".into()),
+                    response.classification,
+                );
+                return Err(format!("{name}:empty_response"));
+            }
+            Err(error) => {
+                record_response(
+                    snapshot,
+                    name,
+                    &[],
+                    started.elapsed(),
+                    Some(error.to_string()),
+                    "transport_error".into(),
+                );
+                return Err(format!("{name}:{error}"));
+            }
+        }
+    }
+    let mut current = snapshot.write().unwrap();
+    current.transport.protocol_up = Observed::value(true, None, "settings_verification");
+    current.transport.last_response_at = Observed::value(now(), None, "settings_verification");
+    current.updated_at = now();
+    Ok(())
 }
 
 fn apply_reconnect_loss(config: &PrinterConfig, store: &Store, count: u64) {
@@ -273,7 +393,7 @@ fn probe(
             Ok(r) if !r.bytes.is_empty() => {
                 any = true;
                 record_response(snapshot, name, &r.bytes, r.duration, None, r.classification);
-                parse_known(name, &r.bytes, snapshot);
+                let _ = parse_known(name, &r.bytes, snapshot);
             }
             Ok(r) => record_response(snapshot, name, &r.bytes, r.duration, None, r.classification),
             Err(e) => record_response(
@@ -295,7 +415,7 @@ fn probe(
             Ok(r) if !r.bytes.is_empty() => {
                 any = true;
                 record_response(snapshot, name, &r.bytes, r.duration, None, r.classification);
-                parse_known(name, &r.bytes, snapshot);
+                let _ = parse_known(name, &r.bytes, snapshot);
             }
             Ok(r) => record_response(snapshot, name, &r.bytes, r.duration, None, r.classification),
             Err(error) => record_response(
@@ -322,7 +442,7 @@ fn probe(
                 Ok(r) if !r.bytes.is_empty() => {
                     any = true;
                     record_response(snapshot, name, &r.bytes, r.duration, None, r.classification);
-                    parse_known(name, &r.bytes, snapshot);
+                    let _ = parse_known(name, &r.bytes, snapshot);
                     snapshot
                         .write()
                         .unwrap()
@@ -472,7 +592,11 @@ fn record_response(
     );
 }
 
-fn parse_known(name: &str, bytes: &[u8], snapshot: &Arc<RwLock<PrinterSnapshot>>) {
+fn parse_known(
+    name: &str,
+    bytes: &[u8],
+    snapshot: &Arc<RwLock<PrinterSnapshot>>,
+) -> Result<(), String> {
     let mut s = snapshot.write().unwrap();
     if let Err(error) = crate::parser::parse(name, bytes, &mut s) {
         let stats = s.query_stats.entry(name.into()).or_default();
@@ -480,7 +604,9 @@ fn parse_known(name: &str, bytes: &[u8], snapshot: &Arc<RwLock<PrinterSnapshot>>
         if let Some(raw) = s.raw_responses.get_mut(name) {
             raw.error = Some(format!("parse_error:{error}"));
         }
+        return Err(format!("{name}:parse_error:{error}"));
     }
+    Ok(())
 }
 
 fn process_job(
@@ -577,4 +703,47 @@ fn consume_media(store: &Store, config: &PrinterConfig, job: &crate::model::Job)
 fn emit(store: &Store, kind: &str, config: &PrinterConfig, id: Uuid, data: serde_json::Value) {
     let e = store.next_event(kind, Some(config.id.clone()), Some(id), data);
     let _ = store.append_event(&e);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn settings_are_written_by_the_printer_worker() {
+        let directory = tempfile::tempdir().unwrap();
+        let device = directory.path().join("printer-device");
+        fs::write(&device, []).unwrap();
+        let store = Store::open(directory.path().join("store")).unwrap();
+        let handle = spawn(
+            PrinterConfig {
+                id: "p1".into(),
+                display_name: "test printer".into(),
+                device: device.clone(),
+                bidirectional_queries: false,
+                ..PrinterConfig::default()
+            },
+            store,
+            StorageMode::Full,
+            5,
+            0,
+            HardwareCounterPolicy::Disabled,
+        );
+        let application = handle
+            .apply_settings(PrinterSettings {
+                darkness: Some(18.5),
+                x_offset_dots: Some(-3),
+                ..PrinterSettings::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            application.verification,
+            SettingsVerification::AppliedUnverified
+        );
+        assert_eq!(
+            fs::read(device).unwrap(),
+            b"^XA^JUR^XZ^XA~SD18.5^LS-3^JUS^XZ"
+        );
+    }
 }

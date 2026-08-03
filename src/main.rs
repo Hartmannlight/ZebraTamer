@@ -5,6 +5,7 @@ mod metrics;
 mod model;
 mod parser;
 mod persist;
+mod settings;
 mod transport;
 mod worker;
 use anyhow::{Context, Result};

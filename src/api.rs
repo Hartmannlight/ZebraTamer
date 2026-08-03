@@ -6,6 +6,7 @@ use crate::{
         MediaDefinition, MediaLedgerEvent, MediaState, Observed,
     },
     persist::Store,
+    settings::{PrinterSettings, PrinterSettingsRecord},
     worker::WorkerHandle,
 };
 use axum::{
@@ -47,6 +48,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/printers/{id}/status", get(printer_status))
         .route("/v1/printers/{id}/snapshot", get(snapshot))
         .route("/v1/printers/{id}/capabilities", get(capabilities))
+        .route(
+            "/v1/printers/{id}/settings",
+            get(printer_settings).patch(patch_printer_settings),
+        )
         .route("/v1/printers/{id}/probe", post(probe))
         .route("/v1/printers/{id}/jobs", post(create_job))
         .route("/v1/jobs", get(jobs))
@@ -170,6 +175,58 @@ async fn capabilities(
     Ok(Json(Envelope::ok(json!(
         w.snapshot.read().unwrap().capabilities
     ))))
+}
+
+async fn printer_settings(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Envelope<Value>>, ApiResponseError> {
+    let w = worker(&s, &id)?;
+    let configured = s
+        .store
+        .load_settings(&id)
+        .map_err(ApiResponseError::internal)?;
+    let observed = w.snapshot.read().unwrap().settings.clone();
+    Ok(Json(Envelope::ok(json!({
+        "printer_id": id,
+        "configured": configured,
+        "observed": observed
+    }))))
+}
+
+async fn patch_printer_settings(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(update): Json<PrinterSettings>,
+) -> Result<Json<Envelope<Value>>, ApiResponseError> {
+    update.validate().map_err(ApiResponseError::bad_request)?;
+    let w = worker(&s, &id)?.clone();
+    let settings = s
+        .store
+        .load_settings(&id)
+        .map_err(ApiResponseError::internal)?
+        .map(|record| record.settings.merged_with(update.clone()))
+        .unwrap_or(update);
+    let application = w
+        .apply_settings(settings.clone())
+        .await
+        .map_err(ApiResponseError::unavailable)?;
+    let record = PrinterSettingsRecord {
+        settings,
+        updated_at: application.applied_at,
+        applied_at: application.applied_at,
+        verification: application.verification,
+        mismatches: application.mismatches,
+    };
+    s.store
+        .save_settings(&id, &record)
+        .map_err(ApiResponseError::internal)?;
+    let observed = w.snapshot.read().unwrap().settings.clone();
+    Ok(Json(Envelope::ok(json!({
+        "printer_id": id,
+        "configured": record,
+        "observed": observed
+    }))))
 }
 async fn probe(
     State(s): State<AppState>,

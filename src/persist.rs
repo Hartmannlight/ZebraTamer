@@ -1,4 +1,5 @@
 use crate::model::{now, Event, Job, JobState, MediaLedgerEvent, MediaState};
+use crate::settings::PrinterSettingsRecord;
 use anyhow::{Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
@@ -109,6 +110,21 @@ impl Store {
     pub fn save_media(&self, printer: &str, media: &MediaState) -> Result<()> {
         fs::create_dir_all(self.printer_dir(printer))?;
         atomic_json(&self.media_path(printer), media)
+    }
+    pub fn settings_path(&self, printer: &str) -> PathBuf {
+        self.printer_dir(printer).join("settings.json")
+    }
+    pub fn load_settings(&self, printer: &str) -> Result<Option<PrinterSettingsRecord>> {
+        let path = self.settings_path(printer);
+        if path.exists() {
+            Ok(Some(read_json(&path)?))
+        } else {
+            Ok(None)
+        }
+    }
+    pub fn save_settings(&self, printer: &str, settings: &PrinterSettingsRecord) -> Result<()> {
+        fs::create_dir_all(self.printer_dir(printer))?;
+        atomic_json(&self.settings_path(printer), settings)
     }
     pub fn append_media_ledger(&self, printer: &str, event: &MediaLedgerEvent) -> Result<()> {
         append_ndjson(
@@ -247,6 +263,7 @@ fn read_ndjson_page<T: DeserializeOwned, F: Fn(&T) -> bool>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::{PrinterSettings, SettingsVerification};
 
     fn job(state: JobState) -> Job {
         Job {
@@ -290,5 +307,27 @@ mod tests {
         atomic_json(&path, &serde_json::json!({"ready":true})).unwrap();
         let value: Value = read_json(&path).unwrap();
         assert_eq!(value["ready"], true);
+    }
+
+    #[test]
+    fn printer_settings_round_trip_in_the_printer_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let timestamp = now();
+        let record = PrinterSettingsRecord {
+            settings: PrinterSettings {
+                darkness: Some(18.5),
+                x_offset_dots: Some(-3),
+                ..PrinterSettings::default()
+            },
+            updated_at: timestamp,
+            applied_at: timestamp,
+            verification: SettingsVerification::Verified,
+            mismatches: vec![],
+        };
+        store.save_settings("p1", &record).unwrap();
+        let loaded = store.load_settings("p1").unwrap().unwrap();
+        assert_eq!(loaded.settings, record.settings);
+        assert_eq!(loaded.verification, SettingsVerification::Verified);
     }
 }

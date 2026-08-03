@@ -74,6 +74,19 @@ impl CharDeviceTransport {
         drain_nonblocking_write(&output, remaining)?;
         Ok(total)
     }
+
+    /// Send one small driver-generated command with the same drained,
+    /// write-only delivery semantics as a print job.
+    pub fn write_bytes(config: &PrinterConfig, bytes: &[u8]) -> Result<u64> {
+        let mut output = OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+            .open(&config.device)
+            .with_context(|| format!("opening printer for write {}", config.device.display()))?;
+        write_all_nonblocking(&mut output, bytes, config.write_timeout())?;
+        drain_nonblocking_write(&output, config.write_timeout())?;
+        Ok(bytes.len() as u64)
+    }
 }
 
 impl PrinterTransport for CharDeviceTransport {
@@ -259,12 +272,16 @@ mod tests {
         let reader = thread::spawn(move || {
             thread::sleep(Duration::from_millis(40));
             let mut received = vec![0u8; 1024 * 1024];
-            printer.read(&mut received).unwrap()
+            let bytes = printer.read(&mut received).unwrap();
+            // Keep the peer alive until the drain completes. Closing it here
+            // races the zero-length write below and can produce EPIPE.
+            (bytes, printer)
         });
         let started = Instant::now();
         drain_nonblocking_write(&file, Duration::from_secs(1)).unwrap();
         assert!(started.elapsed() >= Duration::from_millis(30));
-        assert!(reader.join().unwrap() > 0);
+        let (bytes, _printer) = reader.join().unwrap();
+        assert!(bytes > 0);
 
         let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
         assert!(flags >= 0);

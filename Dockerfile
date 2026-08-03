@@ -7,6 +7,12 @@ COPY build.rs ./
 COPY src ./src
 RUN cargo build --locked --release
 
+FROM build AS test
+RUN rustup component add rustfmt clippy \
+    && cargo fmt -- --check \
+    && cargo clippy --all-targets -- -D warnings \
+    && cargo test --locked
+
 FROM scratch AS artifact
 COPY --from=build /src/target/release/zpl-agent /zpl-agent
 

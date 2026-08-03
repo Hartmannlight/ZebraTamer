@@ -109,6 +109,43 @@ perform printer I/O.
 and structured live status; `GET /v1/printers/{id}/snapshot` additionally returns
 identity, settings, diagnostics, memory, counters, and maintenance data.
 
+### Persistent printer settings
+
+`GET /v1/printers/{id}/settings` returns both the settings managed by the agent
+and the most recently observed values from the printer. `PATCH` applies a partial
+update; omitted fields keep their previously managed value. The supported fields
+are deliberately allowlisted:
+
+| Field | Range | Zebra command |
+| --- | ---: | --- |
+| `darkness` | 0.0 to 30.0 | `~SD` |
+| `print_speed_ips` | 1.0 to 14.0 | `^PR` |
+| `slew_speed_ips` | 1.0 to 14.0 | `^PR` |
+| `backfeed_speed_ips` | 1.0 to 14.0 | `^PR` |
+| `x_offset_dots` | -9999 to 9999 | `^LS` |
+| `y_offset_dots` | -120 to 120 | `^LT` |
+| `tear_off_dots` | -120 to 120 | `~TA` |
+
+```sh
+curl -X PATCH http://localhost:8080/v1/printers/schildkrote/settings \
+  -H 'Content-Type: application/json' \
+  -d '{"darkness":18.5,"print_speed_ips":4,"x_offset_dots":-3,"y_offset_dots":8}'
+```
+
+The agent serializes this operation with print jobs and stores the desired values
+under the selected printer. It first sends `^JUR` to restore the last saved
+configuration, preventing transient values from previous print formats from
+becoming permanent. It then applies the allowlisted changes and sends `^JUS` so
+the printer saves the result in nonvolatile memory. If bidirectional queries are
+enabled, it reads the settings back. The response reports `verified`, `mismatch`,
+or `applied_unverified` and includes individual mismatches.
+
+Head temperature is diagnostic data, not a configurable target temperature.
+For Zebra thermal printers, print energy is controlled with `darkness`. Media
+tracking, calibration, print mode, print technology, and raw SGD/ZPL commands
+are not exposed by this endpoint because they can change media handling or
+enable hardware such as cutters and peelers.
+
 The frequent poll sends only `~HS`. Startup and the slower capability poll use
 `~HI`, `~HD`, `~HM`, `~HB`, `^HH`, selected `~HQ` commands, `^HZr`, and an SGD
 odometer fallback. Large directory/XML dumps and `allcv` are deliberately not
