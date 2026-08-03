@@ -74,6 +74,15 @@ if [ -n "$expected_target" ] && [ "$target" != "$expected_target" ]; then
   exit 1
 fi
 
+if [ "$(id -u)" -ne 0 ]; then
+  cat >&2 <<'EOF'
+This installer must run as root.
+Use:
+  curl -fsSL https://github.com/Hartmannlight/ZebraTamer/releases/latest/download/install.sh | sudo sh
+EOF
+  exit 1
+fi
+
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
 asset="zpl-agent-$target"

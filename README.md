@@ -16,8 +16,11 @@ can be used for named production printers.
 Release installation (run as root):
 
 ```sh
-curl -fsSL https://github.com/Hartmannlight/ZebraTamer/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/Hartmannlight/ZebraTamer/releases/latest/download/install.sh | sudo sh
 ```
+
+`sudo` must apply to `sh` on the right-hand side of the pipe. Applying it only
+to `curl` does not give the installer permission to write to `/usr/local/bin`.
 
 For the deployed Raspberry Pis, use a release profile. The installer selects
 the correct binary from the release, verifies its SHA-256 checksum and needs no
