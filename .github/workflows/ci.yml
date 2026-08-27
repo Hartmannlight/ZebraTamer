@@ -1,71 +1,114 @@
 name: CI
+on:
+  pull_request:
+    branches: [main]
+  workflow_call:
+  workflow_dispatch:
 permissions:
   contents: read
-on:
-  push:
-  pull_request:
-
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test --locked
-      - run: cargo build --locked
-      - run: python3 tests/webui_integration.py target/debug/zpl-agent
-
-  build:
+  native:
+    timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
-          - armv7-unknown-linux-gnueabihf
-    runs-on: ubuntu-latest
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: rust:1-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922
+    env:
+      ZPL_AGENT_GIT_COMMIT: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: taiki-e/install-action@cross
-      - run: cross build --locked --release --target ${{ matrix.target }}
-      - name: Package
-        run: |
-          cp target/${{ matrix.target }}/release/zpl-agent zpl-agent-${{ matrix.target }}
-          sha256sum zpl-agent-${{ matrix.target }} > zpl-agent-${{ matrix.target }}.sha256
-      - uses: actions/upload-artifact@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          name: zpl-agent-${{ matrix.target }}
-          path: |
-            zpl-agent-${{ matrix.target }}
-            zpl-agent-${{ matrix.target }}.sha256
+          persist-credentials: false
+      - name: Install simulator runtime
+        run: apt-get update && apt-get install -y --no-install-recommends python3
+      - name: Locked build, lint and native executable tests
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+          cargo build --locked --release --target "$TARGET"
+          python3 tests/webui_integration.py "target/$TARGET/release/zpl-agent"
+          mkdir -p artifacts
+          cp "target/$TARGET/release/zpl-agent" "artifacts/zpl-agent-$TARGET"
+          cd artifacts
+          "./zpl-agent-$TARGET" --version
+          sha256sum "zpl-agent-$TARGET" > "zpl-agent-$TARGET.sha256"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: binary-${{ matrix.target }}
+          path: artifacts/
+          retention-days: 14
+  armv7:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      ZPL_AGENT_GIT_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2
+        with:
+          tool: cross@0.2.5
+      - name: Preserve 32-bit ARM build support
+        run: |
+          cross build --locked --release --target armv7-unknown-linux-gnueabihf
+          mkdir -p artifacts
+          cp target/armv7-unknown-linux-gnueabihf/release/zpl-agent artifacts/zpl-agent-armv7-unknown-linux-gnueabihf
+          cd artifacts
+          sha256sum zpl-agent-armv7-unknown-linux-gnueabihf > zpl-agent-armv7-unknown-linux-gnueabihf.sha256
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: binary-armv7-unknown-linux-gnueabihf
+          path: artifacts/
+          retention-days: 14
 
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, build]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+  source-security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          pattern: zpl-agent-*
-          merge-multiple: true
-      - name: Metadata
+          persist-credentials: false
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          # renovate: datasource=github-releases depName=aquasecurity/trivy
+          version: v0.74.0
+          cache: true
+      - name: Scan locked dependencies, configuration and secrets
         run: |
-          printf '%s\n' "${GITHUB_REF_NAME}" > VERSION
-          printf '%s\n' "${GITHUB_SHA}" > COMMIT
-      - uses: softprops/action-gh-release@v2
+          mkdir -p artifacts
+          python3 scripts/security_gate.py --self-test
+
+          trivy fs --scanners vuln,misconfig,secret --include-dev-deps --skip-dirs .git,.venv,node_modules,target,artifacts --skip-files '**/*.dockerignore' --format json --output "$RUNNER_TEMP/source-scan.json" .
+          python3 scripts/security_gate.py "$RUNNER_TEMP/source-scan.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
         with:
-          files: |
-            zpl-agent-*
-            install.sh
-            config.example.toml
-            packaging/zpl-agent.service
-            packaging/70-zpl-agent-device.rules
-            packaging/zpl-agent.modules.conf
-            VERSION
-            COMMIT
+          name: source-security-report
+          path: artifacts/source-scan.json
+          retention-days: 14
+  quality-and-container-gate:
+    name: quality-and-binary-gate
+    if: always()
+    needs: [native, armv7, source-security]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every binary gate
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 -c 'import json,os; assert all(j["result"] == "success" for j in json.loads(os.environ["RESULTS"]).values())'

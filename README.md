@@ -158,3 +158,11 @@ Probe commands include the T402-compatible `~HS`, `~HD`, `~HM`, `~HB`, `^HH`, an
 the R/E/B/Z directory queries. Optional SGD, `~HQ`, and odometer commands are
 reported as supported only after a response; an offline timeout remains
 `unavailable`, not `not_supported`.
+
+
+## Automated maintenance and releases
+
+Push to main creates an immutable prerelease build-SHA-rRUN-ATTEMPT. Exact vMAJOR.MINOR.PATCH tags create immutable stable releases. No agent container is published. ARM64/AMD64 run native PTY integration tests on Debian Bookworm; ARMv7 is cross-compiled and is not runtime-tested.
+
+See [policy](docs/SECURITY_RELEASE_POLICY.md), [required owner setup](docs/MANUAL_GITHUB_SETUP.md) and [rollback](docs/ROLLBACK.md).
+Renovate auto-merge remains blocked until protected-branch checks are verified. No deployment automation is installed.
