@@ -2,8 +2,8 @@ use crate::{
     config::{Config, StorageMode},
     metrics,
     model::{
-        now, AccountingConfidence, ApiError, Envelope, Event, Job, JobState, MediaAdjustment,
-        MediaDefinition, MediaLedgerEvent, MediaState, Observed,
+        now, ApiError, Envelope, Event, Job, JobState, MediaAdjustment, MediaDefinition,
+        MediaState, Observed,
     },
     persist::Store,
     worker::WorkerHandle,
@@ -37,7 +37,7 @@ pub struct AppState {
 }
 
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/", get(root))
         .route("/healthz", get(health))
         .route("/metrics", get(prometheus))
@@ -52,13 +52,38 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/jobs/{id}", get(job))
         .route("/v1/jobs/{id}/events", get(job_events))
         .route("/v1/jobs/{id}/payload", get(payload))
-        .route("/v1/printers/{id}/media", get(media).put(put_media))
+        .route(
+            "/v1/printers/{id}/media",
+            get(media)
+                .put(put_media)
+                .patch(edit_media)
+                .layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
+            "/v1/printers/{id}/configuration",
+            get(configuration)
+                .post(save_configuration)
+                .layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
+            "/v1/printers/{id}/configuration/read",
+            post(read_configuration),
+        )
         .route("/v1/printers/{id}/media/unload", post(unload_media))
         .route("/v1/printers/{id}/media/adjustments", post(adjust_media))
         .route("/v1/events", get(events))
         .layer(DefaultBodyLimit::disable())
-        .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .layer(TraceLayer::new_for_http());
+    let router = if state.config.webui_enabled {
+        router
+            .route("/ui", get(crate::webui::index))
+            .route("/ui/", get(crate::webui::index))
+            .route("/ui/app.js", get(crate::webui::javascript))
+            .route("/ui/style.css", get(crate::webui::stylesheet))
+    } else {
+        router
+    };
+    router.with_state(state)
 }
 
 async fn root() -> Json<Envelope<Value>> {
@@ -71,7 +96,7 @@ async fn health() -> Json<Envelope<Value>> {
 }
 async fn agent(State(s): State<AppState>) -> Json<Envelope<Value>> {
     Json(Envelope::ok(
-        json!({"version":env!("CARGO_PKG_VERSION"),"commit":env!("ZPL_AGENT_GIT_COMMIT"),"started_at":s.started,"uptime_seconds":(now()-s.started).num_seconds().max(0),"storage_mode":s.config.storage_mode,"printers":s.workers.len()}),
+        json!({"agent_id":s.config.agent_id,"version":env!("CARGO_PKG_VERSION"),"commit":env!("ZPL_AGENT_GIT_COMMIT"),"started_at":s.started,"uptime_seconds":(now()-s.started).num_seconds().max(0),"storage_mode":s.config.storage_mode,"printers":s.workers.len(),"webui_enabled":s.config.webui_enabled}),
     ))
 }
 async fn prometheus(State(s): State<AppState>) -> Response {
@@ -389,103 +414,132 @@ async fn media(
         });
     Ok(Json(Envelope::ok(observed)))
 }
+fn control_error(error: String) -> ApiResponseError {
+    if error.starts_with("conflict:") {
+        ApiResponseError::new(StatusCode::CONFLICT, "conflict", error)
+    } else {
+        ApiResponseError::new(StatusCode::BAD_GATEWAY, "device_operation_failed", error)
+    }
+}
+
+async fn configuration(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Envelope<Value>>, ApiResponseError> {
+    let w = worker(&s, &id)?;
+    let observed: Option<crate::device::Observation> =
+        crate::persist::read_json(&s.store.printer_dir(&id).join("configuration.json")).ok();
+    let last_save: Option<Value> =
+        crate::persist::read_json(&s.store.printer_dir(&id).join("configuration-attempt.json"))
+            .ok();
+    let media =
+        crate::media::state_with_revision(&s.store, &id).map_err(ApiResponseError::internal)?;
+    Ok(Json(Envelope::ok(
+        json!({"device": {"observation": observed, "profile": w.config.device_profile, "last_save": last_save},
+        "media": media, "webui_enabled": s.config.webui_enabled}),
+    )))
+}
+async fn read_configuration(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Envelope<Value>>, ApiResponseError> {
+    crate::webui::authorize(&s.config, &headers)?;
+    Ok(Json(Envelope::ok(
+        worker(&s, &id)?
+            .read_device()
+            .await
+            .map_err(control_error)?,
+    )))
+}
+async fn save_configuration(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<crate::device::SaveRequest>,
+) -> Result<Json<Envelope<Value>>, ApiResponseError> {
+    crate::webui::authorize(&s.config, &headers)?;
+    let w = worker(&s, &id)?;
+    request
+        .settings
+        .validate(&w.config.device_profile)
+        .map_err(|e| ApiResponseError::bad_request(e.to_string()))?;
+    if !request.confirm_save_all {
+        return Err(ApiResponseError::bad_request(
+            "Explicit save confirmation is required",
+        ));
+    }
+    Ok(Json(Envelope::ok(
+        w.save_device(request).await.map_err(control_error)?,
+    )))
+}
+fn media_authorization(s: &AppState, headers: &HeaderMap) -> Result<(), ApiResponseError> {
+    if s.config.admin_token.is_some() {
+        crate::webui::authorize(&s.config, headers)?;
+    }
+    Ok(())
+}
 async fn put_media(
     State(s): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(def): Json<MediaDefinition>,
-) -> Result<Json<Envelope<MediaState>>, ApiResponseError> {
-    worker(&s, &id)?;
-    if let Some(old) = s
-        .store
-        .load_media(&id)
-        .map_err(ApiResponseError::internal)?
-    {
-        let history = s.store.printer_dir(&id).join(format!(
-            "media-{}.json",
-            old.loaded_at.format("%Y%m%dT%H%M%S%.fZ")
-        ));
-        crate::persist::atomic_json(&history, &old).map_err(ApiResponseError::internal)?;
-    }
-    let state = MediaState {
-        initial_labels: def.labels_available_at_load,
-        remaining_labels: def.labels_available_at_load,
-        consumed_labels_total: 0,
-        accounting_deficit_labels: 0,
-        accounting_confidence: AccountingConfidence::Estimated,
-        last_accounting_event_at: None,
-        ledger_sequence: 0,
-        loaded_at: now(),
-        media: def,
-    };
-    s.store
-        .save_media(&id, &state)
-        .map_err(ApiResponseError::internal)?;
-    Ok(Json(Envelope::ok(state)))
+) -> Result<Json<Envelope<Value>>, ApiResponseError> {
+    media_authorization(&s, &headers)?;
+    crate::media::validate(&def).map_err(|e| ApiResponseError::bad_request(e.to_string()))?;
+    let result = worker(&s, &id)?
+        .control(move |config, store, _, _| {
+            crate::media::load(store, &config.id, def).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(control_error)?;
+    Ok(Json(Envelope::ok(result)))
+}
+async fn edit_media(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<crate::media::EditRequest>,
+) -> Result<Json<Envelope<Value>>, ApiResponseError> {
+    media_authorization(&s, &headers)?;
+    crate::media::validate(&request.media)
+        .map_err(|e| ApiResponseError::bad_request(e.to_string()))?;
+    let result = worker(&s, &id)?
+        .control(move |config, store, _, _| {
+            crate::media::edit(store, &config.id, request).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(control_error)?;
+    Ok(Json(Envelope::ok(result)))
 }
 async fn unload_media(
     State(s): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<Envelope<Value>>, ApiResponseError> {
-    worker(&s, &id)?;
-    let Some(old) = s
-        .store
-        .load_media(&id)
-        .map_err(ApiResponseError::internal)?
-    else {
-        return Err(ApiResponseError::not_found("no_media_loaded"));
-    };
-    let history = s.store.printer_dir(&id).join(format!(
-        "media-unloaded-{}.json",
-        now().format("%Y%m%dT%H%M%S%.fZ")
-    ));
-    crate::persist::atomic_json(&history, &old).map_err(ApiResponseError::internal)?;
-    std::fs::remove_file(s.store.media_path(&id)).map_err(ApiResponseError::io)?;
-    Ok(Json(Envelope::ok(json!({"unloaded":true}))))
+    media_authorization(&s, &headers)?;
+    let result = worker(&s, &id)?
+        .control(|config, store, _, _| {
+            crate::media::unload(store, &config.id).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(control_error)?;
+    Ok(Json(Envelope::ok(result)))
 }
 async fn adjust_media(
     State(s): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(adj): Json<MediaAdjustment>,
-) -> Result<Json<Envelope<MediaState>>, ApiResponseError> {
-    worker(&s, &id)?;
-    let mut m = s
-        .store
-        .load_media(&id)
-        .map_err(ApiResponseError::internal)?
-        .ok_or_else(|| ApiResponseError::not_found("no_media_loaded"))?;
-    let before = m.remaining_labels;
-    if adj.delta < 0 {
-        let debit = adj.delta.unsigned_abs();
-        m.remaining_labels = m.remaining_labels.saturating_sub(debit);
-        m.consumed_labels_total = m.consumed_labels_total.saturating_add(debit);
-        m.accounting_deficit_labels = m
-            .accounting_deficit_labels
-            .saturating_add(debit.saturating_sub(before));
-    } else {
-        m.remaining_labels = m.remaining_labels.saturating_add(adj.delta as u64);
-    }
-    m.ledger_sequence += 1;
-    m.last_accounting_event_at = Some(now());
-    let ev = MediaLedgerEvent {
-        sequence: m.ledger_sequence,
-        at: now(),
-        delta: adj.delta,
-        reason: adj.reason,
-        source: adj.source,
-        job_id: adj.job_id,
-        before,
-        after: m.remaining_labels,
-        deficit_after: m.accounting_deficit_labels,
-        hardware_counter_before: adj.hardware_counter_before,
-        hardware_counter_after: adj.hardware_counter_after,
-    };
-    s.store
-        .append_media_ledger(&id, &ev)
-        .map_err(ApiResponseError::internal)?;
-    s.store
-        .save_media(&id, &m)
-        .map_err(ApiResponseError::internal)?;
-    Ok(Json(Envelope::ok(m)))
+) -> Result<Json<Envelope<Value>>, ApiResponseError> {
+    media_authorization(&s, &headers)?;
+    let result = worker(&s, &id)?
+        .control(move |config, store, _, _| {
+            crate::media::adjust(store, &config.id, adj).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(control_error)?;
+    Ok(Json(Envelope::ok(result)))
 }
 
 pub struct ApiResponseError {
@@ -494,7 +548,7 @@ pub struct ApiResponseError {
     message: String,
 }
 impl ApiResponseError {
-    fn new(status: StatusCode, code: &str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(status: StatusCode, code: &str, message: impl Into<String>) -> Self {
         Self {
             status,
             code: code.into(),

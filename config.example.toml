@@ -1,6 +1,13 @@
 listen = "0.0.0.0:8080"
 data_dir = "/var/lib/zpl-agent"
 storage_mode = "full"
+# Optional browser UI at /ui/. Generate your own token (at least 24 characters).
+# Device writes always require this token; when set, media writes require it too.
+webui_enabled = false
+# admin_token = "replace-with-a-long-random-token"
+# Optional: set a permanent, globally unique identity. If omitted, a UUID is
+# generated once and stored in data_dir/agent-id. Back up that file with the data.
+# agent_id = "workshop-pi"
 mdns_enabled = true
 poll_interval_secs = 30
 capability_poll_interval_secs = 3600
@@ -19,3 +26,15 @@ model_hint = "Zebra T402"
 first_byte_timeout_ms = 5000
 idle_timeout_ms = 500
 write_timeout_ms = 30000
+
+# Confirm these limits against YOUR printer's manual before enabling device writes.
+# Unsupported options remain disabled in the UI. DPI is a hardware fact, not a setting.
+[printers.device_profile]
+resolution_dpi = 203
+max_width_dots = 832
+max_length_dots = 32000
+max_speed_ips = 6
+max_offset_dots = 64
+thermal_transfer = false
+peel_off = false
+cutter = false

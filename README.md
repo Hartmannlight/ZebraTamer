@@ -1,9 +1,95 @@
 # zpl-agent
 
-`zpl-agent` is a small, headless Linux service for FIFO-controlled Zebra ZPL II
-printers exposed as character devices. It provides REST/JSON, Prometheus metrics,
-and DNS-SD only—there is no UI, database, CUPS/IPP, port 9100, authentication, or
-automatic retry.
+`zpl-agent` is a small Linux service for FIFO-controlled Zebra ZPL II printers
+exposed as character devices. It provides REST/JSON, Prometheus metrics, DNS-SD,
+and an optional built-in WebUI for persistent device settings and loaded media.
+There is no database server, CUPS/IPP, port 9100 listener, or automatic retry.
+
+## Optional WebUI and persistent printer settings
+
+The WebUI is embedded in the binary: no Node.js, frontend server or PrintHub is
+required. It is disabled by default. In `/etc/zpl-agent/config.toml`, set these
+**top-level** values (before any `[[printers]]` table):
+
+```toml
+webui_enabled = true
+admin_token = "your-own-random-token-at-least-24-characters"
+```
+
+Generate a private random token, for example with `openssl rand -hex 24`, protect
+the config file, and restart `zpl-agent`. Open `http://<agent-host>:8080/ui/` and
+enter that token. It is not embedded in the HTML or saved in browser storage.
+The device APIs also work with the WebUI disabled when an admin token is set.
+
+**Network boundary:** the legacy print/job API remains unauthenticated and can
+send arbitrary ZPL. The admin token is not a security boundary against clients
+that can access that API. Keep the whole service on a trusted network or behind
+an authenticated TLS reverse proxy/firewall; do not expose port 8080 publicly.
+The browser UI uses same-origin requests, no external assets and a restrictive CSP.
+
+For each printer, configure `[printers.device_profile]` after its `[[printers]]`
+entry. Set the actual DPI, limits, and installed `thermal_transfer`, `peel_off`,
+and `cutter` options; see `config.example.toml`. These are operator-confirmed
+hardware capabilities, **not auto-detected hardware claims**. Conservative generic
+defaults disable those three options. Older firmware may not report every field;
+unreadable/ambiguous fields stay disabled rather than being guessed.
+
+### Device values vs. loaded media
+
+- **Device values:** absolute darkness (`~SD`), speed (`^PR`), left/top position
+  (`^LS`/`^LT`), print width (`^PW`), continuous-media length (`^LL`), output mode
+  (`^MM`), direct-thermal/thermal-transfer (`^MT`), and media tracking (`^MN`).
+- **Loaded media:** name, size, color, material/technology, and roll accounting
+  belong to ZebraTamer, in `data_dir/printers/<id>/media.json`. Color is never
+  sent as a printer setting. Editing metadata preserves consumption. Loading a
+  new roll explicitly archives the old state and starts new accounting.
+- For gap/mark labels, length is determined by the printer's media calibration.
+  This UI does not automatically feed/calibrate the printer when metadata changes.
+  Use the printer's calibration procedure when changing that stock. The stored
+  physical label dimensions still drive clients' layouts independently.
+
+"Im Drucker speichern" executes in the same per-printer worker as jobs and polls:
+fresh `^HH` read → revision check → apply only changed typed settings → read back
+and compare → send `^JUS` only if the requested fields match → read back again.
+No job/poll can interleave. `^JUS` saves **all current persistent parameters**, not
+just edited fields; inspect the raw configuration and acknowledge this before
+saving. Other clients' prior ZPL may have changed those parameters.
+
+The result distinguishes `not_saved`, `apply_outcome_unknown`,
+`save_outcome_unknown`, and `save_sent_active_verified`. Successful transport is
+not proof of flash persistence: the UI explicitly says power-cycle persistence
+has not been verified. Failed/uncertain operations are never automatically retried,
+and runtime changes are not silently rolled back. Read the printer again first.
+The last observation and attempt are persisted separately in `configuration.json`
+and `configuration-attempt.json`; stale cached observations carry a timestamp.
+
+Ordinary print jobs **do not** replay device settings or `preferred_settings`.
+They transmit caller-supplied ZPL. A client that explicitly sends conflicting ZPL
+can still override the active settings. Updated PrintHub leaves these device
+defaults alone; its old local printer values remain archival migration data only.
+Set up the loaded roll and DPI in ZebraTamer before registering a new printer there.
+
+### API
+
+All responses retain the existing `v1` envelope. Administrative requests use
+`Authorization: Bearer <admin_token>`.
+
+| Endpoint | Meaning |
+| --- | --- |
+| `GET /v1/printers/{id}/configuration` | Cached observation, declared profile, last save, authoritative media + edit revision; no device I/O |
+| `POST /v1/printers/{id}/configuration/read` | Read live device configuration; token required |
+| `POST /v1/printers/{id}/configuration` | `{revision, settings, confirm_save_all: true}`; token required |
+| `GET /v1/printers/{id}/media` | Existing authoritative media API |
+| `PATCH /v1/printers/{id}/media` | `{revision, media}`; edit metadata without resetting counters |
+| `PUT /v1/printers/{id}/media` | Explicitly load a new roll |
+
+Media writes require the token whenever `admin_token` is configured. Existing
+headless installations without a token retain their previous media-API behavior.
+All media mutations are serialized with printing to prevent lost consumption.
+Back up the **entire** `data_dir`, including agent identity and media history.
+
+References: [Zebra configuration persistence](https://docs.zebra.com/us/en/printers/desktop/bm-zd620-and-zd420-desktop-printers-user-guide-ditamap/c-zd620-420-zpl-configuration/c-zd620-420-managing-the-zpl-printer-configuration.html),
+[ZPL configuration commands](https://cpws.zebra.com/cpws/docs/gseries/GX_Darkness.pdf).
 
 ## Quick start on Debian
 
@@ -24,6 +110,7 @@ competing sender process.
 cargo fmt --check
 cargo test --locked
 cargo build --release --locked
+python3 tests/webui_integration.py target/release/zpl-agent
 ```
 
 On Windows, the same Debian build can be reproduced with Docker:
@@ -48,6 +135,17 @@ Pass the device through only on a Linux Docker host, for example
 Raspberry Pi because it simplifies device permissions and mDNS.
 
 ## API notes
+
+### Stable agent identity
+
+The agent exposes `agent_id` in `GET /v1/agent` and both DNS-SD service TXT records.
+Set an explicit, unique `agent_id = "workshop-pi"` in the configuration, or omit it
+to generate a UUID on first normal startup. Generated IDs are persisted in
+`data_dir/agent-id`; keep and back up that file across updates and IP changes.
+Do not clone the same identity onto two physical agents. `--check-config` does
+not create an identity or modify data. Invalid persisted identity fails startup
+instead of silently generating a replacement. PrintHub uses the agent ID plus
+local printer ID to avoid collisions between agents and preserve printer settings.
 
 All API results use the versioned envelope. Job bodies with
 `Content-Type: application/zpl` are streamed to disk and hashed without retaining

@@ -1,10 +1,13 @@
 mod api;
 mod config;
+mod device;
 mod mdns;
+mod media;
 mod metrics;
 mod model;
 mod persist;
 mod transport;
+mod webui;
 mod worker;
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -36,11 +39,14 @@ async fn main() -> Result<()> {
         )
         .init();
     let args = Args::parse();
-    let config = Config::load(&args.config)?;
+    let mut config = Config::load(&args.config)?;
     if args.check_config {
         println!("configuration valid");
         return Ok(());
     }
+    config
+        .ensure_agent_id()
+        .context("initializing persistent agent identity")?;
     let store = Store::open(config.data_dir.clone())?;
     apply_boot_accounting(&config, &store)?;
     let recovered = store.recover_jobs()?;

@@ -16,6 +16,7 @@ pub struct QueryResponse {
 }
 
 pub trait PrinterTransport: Send {
+    fn write_bytes(&mut self, data: &[u8]) -> Result<()>;
     fn query(
         &mut self,
         command: &[u8],
@@ -46,6 +47,9 @@ impl CharDeviceTransport {
 }
 
 impl PrinterTransport for CharDeviceTransport {
+    fn write_bytes(&mut self, data: &[u8]) -> Result<()> {
+        write_all_nonblocking(&mut self.device, data, self.write_timeout)
+    }
     fn query(
         &mut self,
         command: &[u8],

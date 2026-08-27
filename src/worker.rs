@@ -39,7 +39,21 @@ pub const OPTIONAL_QUERIES: &[(&str, &[u8])] = &[
     ),
 ];
 
+type ControlOperation = Box<
+    dyn FnOnce(
+            &PrinterConfig,
+            &Store,
+            &Arc<RwLock<PrinterSnapshot>>,
+            &mut Option<CharDeviceTransport>,
+        ) -> Result<serde_json::Value, String>
+        + Send,
+>;
+
 enum Command {
+    Control {
+        operation: ControlOperation,
+        reply: oneshot::Sender<Result<serde_json::Value, String>>,
+    },
     Probe {
         capabilities: bool,
         reply: oneshot::Sender<Result<(), String>>,
@@ -63,6 +77,53 @@ struct WorkerOptions {
 }
 
 impl WorkerHandle {
+    pub async fn control<F>(&self, operation: F) -> Result<serde_json::Value, String>
+    where
+        F: FnOnce(
+                &PrinterConfig,
+                &Store,
+                &Arc<RwLock<PrinterSnapshot>>,
+                &mut Option<CharDeviceTransport>,
+            ) -> Result<serde_json::Value, String>
+            + Send
+            + 'static,
+    {
+        let (reply, receiver) = oneshot::channel();
+        self.tx
+            .try_send(Command::Control {
+                operation: Box::new(operation),
+                reply,
+            })
+            .map_err(|_| "worker_queue_full".to_string())?;
+        receiver.await.map_err(|_| "worker_stopped".to_string())?
+    }
+
+    pub async fn read_device(&self) -> Result<serde_json::Value, String> {
+        self.control(|config, store, snapshot, transport| {
+            ensure_transport(config, transport, snapshot)?;
+            let observed = crate::device::read_configuration(transport.as_mut().unwrap(), config)
+                .map_err(|e| e.to_string())?;
+            crate::persist::atomic_json(
+                &store.printer_dir(&config.id).join("configuration.json"),
+                &observed,
+            )
+            .map_err(|e| e.to_string())?;
+            serde_json::to_value(observed).map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn save_device(
+        &self,
+        request: crate::device::SaveRequest,
+    ) -> Result<serde_json::Value, String> {
+        self.control(move |config, store, snapshot, transport| {
+            ensure_transport(config, transport, snapshot)?;
+            crate::device::save_configuration(transport.as_mut().unwrap(), config, store, &request)
+                .map_err(|e| e.to_string())
+        })
+        .await
+    }
     pub async fn probe(&self) -> Result<(), String> {
         self.request_probe(true).await
     }
@@ -146,6 +207,10 @@ fn run(
             continue;
         }
         match rx.recv() {
+            Ok(Command::Control { operation, reply }) => {
+                let result = operation(&config, &store, &snapshot, &mut transport);
+                let _ = reply.send(result);
+            }
             Ok(Command::Probe {
                 capabilities,
                 reply,

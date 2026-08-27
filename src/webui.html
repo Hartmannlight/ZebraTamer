@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZebraTamer · Drucker & Material</title><link rel="stylesheet" href="/ui/style.css"><script src="/ui/app.js" defer></script></head>
+<body><header class="topbar"><a class="brand" href="/ui/" aria-label="ZebraTamer Start"><span class="brand-mark">Z</span>ZebraTamer</a><span class="local-badge">LOKALE DRUCKERVERWALTUNG</span></header>
+<main><div class="page-heading"><div><p class="eyebrow">EINMAL EINSTELLEN. DANACH DRUCKEN.</p><h1>Drucker & Material</h1><p class="intro">Gerätevorgaben im Drucker speichern. Eingelegte Etiketten bei ZebraTamer verwalten.</p></div><label class="printer-picker">Drucker<select id="printer" aria-label="Drucker"><option value="">Laden …</option></select></label></div>
+<section class="access-bar"><label>Admin-Token<input id="token" type="password" autocomplete="off" placeholder="Token aus config.toml" spellcheck="false"></label><p>Nur für Änderungen und Geräteabfragen. Das Token bleibt ausschließlich im Arbeitsspeicher dieses Tabs.</p><button id="reload" type="button" class="secondary">Ansicht aktualisieren</button></section>
+<div id="notice" role="status" aria-live="polite" hidden></div>
+<div class="workspace">
+<section class="card media-card"><div class="section-heading"><div><p class="eyebrow">01 · EINGELEGTE ROLLE</p><h2>Das Material</h2></div><span class="storage-tag">Bei ZebraTamer</span></div>
+<div class="label-preview"><svg viewBox="0 0 240 130" role="img" aria-label="Farbvorschau der eingelegten Etiketten"><rect id="swatch" x="30" y="20" width="180" height="90" rx="9" fill="#f1e6a3"/><path d="M50 44h60M50 55h100M50 66h85" stroke="#151c28" stroke-width="3"/><path d="M50 81v14m4-14v14m7-14v14m3-14v14m6-14v14m8-14v14m3-14v14m7-14v14m5-14v14m8-14v14" stroke="#151c28" stroke-width="2"/></svg><div><strong id="media-title">Keine Rolle erfasst</strong><span id="media-summary">Größe und Farbe hier hinterlegen</span><span id="media-count"></span></div></div>
+<form id="media-form"><div class="fields"><label class="span-2">Bezeichnung<input id="media-name" required maxlength="200" placeholder="z. B. Lageretiketten gelb"></label>
+<label>Breite <span>mm</span><input id="media-width" required type="number" min="0.01" max="10000" step="any" value="50"></label><label>Höhe <span>mm</span><input id="media-height" required type="number" min="0.01" max="10000" step="any" value="25"></label>
+<label>Farbname<input id="media-color-name" required maxlength="100" value="Weiß"></label><label>Farbvorschau<input id="media-color" type="color" value="#ffffff"></label>
+<label>Medienerkennung<select id="media-tracking"><option value="gap">Lücke / Gap</option><option value="black_mark">Schwarzmarke</option><option value="continuous">Endlos</option><option value="notch">Kerbe</option><option value="hole">Loch</option><option value="unknown">Unbekannt</option></select></label>
+<label>Material für<select id="media-technology"><option value="direct_thermal">Thermodirekt</option><option value="thermal_transfer">Thermotransfer</option><option value="unknown">Unbekannt</option></select></label>
+<label>Etiketten auf neuer Rolle<input id="media-quantity" type="number" min="0" max="1000000000" step="1" value="0" required></label><label>Warnung unter<input id="media-warning" type="number" min="0" step="1" value="10" required></label></div>
+<p class="help">Farbe, Maße und Material sind Angaben zur Rolle. Speichern sendet keine Gerätebefehle und setzt den Verbrauchszähler nicht zurück.</p>
+<div class="actions"><button id="save-media" type="submit">Rollendaten speichern</button><button id="load-roll" type="button" class="secondary">Neue Rolle einlegen</button><button id="unload-roll" type="button" class="text-button">Rolle entfernen</button></div></form></section>
+<section class="card device-card"><div class="section-heading"><div><p class="eyebrow">02 · GERÄTEVORGABEN</p><h2>Der Drucker</h2></div><span class="storage-tag">Im Drucker</span></div>
+<div class="device-toolbar"><p id="device-status">Noch keine Gerätewerte ausgelesen.</p><button id="read-device" type="button" class="secondary">Vom Drucker lesen</button></div>
+<form id="device-form"><div id="device-fields" class="fields"></div>
+<p class="help">Offsets und Druckbereich in Druckpunkten. Geschwindigkeit in Zoll/s. Nicht auslesbare Werte sind gesperrt. Verfügbare Betriebsarten richten sich nach dem konfigurierten Hardwareprofil.</p>
+<button id="copy-width" type="button" class="text-button">Druckbereich aus Rollenmaßen übernehmen</button>
+<div class="save-note"><strong>Dauerhaft speichern</strong><p>Änderungen werden zuerst gesetzt und zurückgelesen. Erst bei Übereinstimmung sendet ZebraTamer <code>^JUS</code>. Dieser Befehl speichert alle aktuell speicherbaren Gerätewerte.</p><label class="checkbox"><input id="confirm-save" type="checkbox" required>Ich möchte die aktuellen Gerätevorgaben dauerhaft speichern.</label></div>
+<button id="save-device" type="submit">Im Drucker speichern</button></form>
+<details><summary>Letzter Speichervorgang & Rohdaten</summary><pre id="diagnostics">Noch keine Daten.</pre></details></section>
+</div><footer>ZebraTamer ist die Datenquelle für Rollenangaben. Druckaufträge dürfen die Gerätevorgaben nur bewusst überschreiben.</footer></main></body></html>
