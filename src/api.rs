@@ -210,16 +210,17 @@ async fn create_job(
         ));
     }
     if !driver.accepts(content) {
-        return Err(ApiResponseError::bad_request(
-            format!(
-                "content type must match driver {}; accepted: {}",
-                driver.id,
-                driver.accepted_mime_types.join(", ")
-            ),
-        ));
+        return Err(ApiResponseError::bad_request(format!(
+            "content type must match driver {}; accepted: {}",
+            driver.id,
+            driver.accepted_mime_types.join(", ")
+        )));
     }
     let idempotency_key = header_string(&headers, "x-idempotency-key");
-    if idempotency_key.as_ref().is_some_and(|value| value.is_empty() || value.len() > 255) {
+    if idempotency_key
+        .as_ref()
+        .is_some_and(|value| value.is_empty() || value.len() > 255)
+    {
         return Err(ApiResponseError::bad_request(
             "x-idempotency-key must contain between 1 and 255 characters",
         ));

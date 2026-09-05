@@ -41,7 +41,9 @@ mod tests {
 
     #[test]
     fn descriptors_keep_device_payload_contracts_explicit() {
-        assert!(descriptor("zpl").unwrap().accepts("application/zpl; charset=utf-8"));
+        assert!(descriptor("zpl")
+            .unwrap()
+            .accepts("application/zpl; charset=utf-8"));
         let niimbot = descriptor("niimbot_b1").unwrap();
         assert!(!niimbot.available);
         assert!(niimbot.accepts("application/vnd.printhub.niimbot-b1-raster+v1"));
