@@ -24,21 +24,16 @@ pub fn announce(config: &Config) -> Result<Option<MdnsGuard>> {
     agent_props.insert("api_version".into(), "v1".into());
     agent_props.insert("rest_path".into(), "/v1".into());
     agent_props.insert("metrics_path".into(), "/metrics".into());
-    for (service_type, prefix) in [
-        ("_print-agent._tcp.local.", "print-agent"),
-        ("_zpl-agent._tcp.local.", "zpl-agent"),
-    ] {
-        let agent = ServiceInfo::new(
-            service_type,
-            &instance_name(prefix, agent_id),
-            &host,
-            "0.0.0.0",
-            port,
-            agent_props.clone(),
-        )?
-        .enable_addr_auto();
-        daemon.register(agent)?;
-    }
+    let agent = ServiceInfo::new(
+        "_print-agent._tcp.local.",
+        &instance_name("print-agent", agent_id),
+        &host,
+        "0.0.0.0",
+        port,
+        agent_props,
+    )?
+    .enable_addr_auto();
+    daemon.register(agent)?;
     for p in &config.printers {
         let mut props = HashMap::new();
         props.insert("agent_id".to_string(), agent_id.to_string());
@@ -53,8 +48,8 @@ pub fn announce(config: &Config) -> Result<Option<MdnsGuard>> {
         props.insert("transport".to_string(), p.transport.clone());
         props.insert("driver".to_string(), p.driver.clone());
         let info = ServiceInfo::new(
-            "_zpl-printer._tcp.local.",
-            &instance_name("zpl-printer", &format!("{agent_id}:{}", p.id)),
+            "_print-agent-printer._tcp.local.",
+            &instance_name("print-agent-printer", &format!("{agent_id}:{}", p.id)),
             &host,
             "0.0.0.0",
             port,
@@ -79,7 +74,7 @@ fn hostname(agent_id: &str) -> String {
     let name = std::env::var("HOSTNAME")
         .ok()
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| instance_name("zpl-agent", agent_id));
+        .unwrap_or_else(|| instance_name("print-agent", agent_id));
     if name.ends_with('.') {
         name
     } else if name.ends_with(".local") {
@@ -98,12 +93,12 @@ mod tests {
         let long = "x".repeat(200);
         assert!(instance_name("zpl-printer", &long).len() <= 63);
         assert_eq!(
-            instance_name("zpl-agent", &long),
-            instance_name("zpl-agent", &long)
+            instance_name("print-agent", &long),
+            instance_name("print-agent", &long)
         );
         assert_ne!(
-            instance_name("zpl-printer", "pi-a:zebra"),
-            instance_name("zpl-printer", "pi-b:zebra")
+            instance_name("print-agent-printer", "pi-a:zebra"),
+            instance_name("print-agent-printer", "pi-b:zebra")
         );
     }
 }

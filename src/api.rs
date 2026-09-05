@@ -90,7 +90,7 @@ pub fn router(state: AppState) -> Router {
 
 async fn root() -> Json<Envelope<Value>> {
     Json(Envelope::ok(
-        json!({"service":"print-agent","compatibility_service":"zpl-agent","api_version":"v1"}),
+        json!({"service":"print-agent","api_version":"v1"}),
     ))
 }
 async fn health() -> Json<Envelope<Value>> {

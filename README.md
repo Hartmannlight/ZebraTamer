@@ -1,10 +1,10 @@
-# PrintAgent (ZebraTamer compatibility)
+# PrintAgent
 
 PrintAgent is a small Linux edge service for locally attached printers. The
-current `zpl-agent` binary and ZebraTamer API names remain compatibility aliases
-while deployments migrate. Its first production driver supports FIFO-controlled
-Zebra ZPL II printers
-exposed as character devices. It provides REST/JSON, Prometheus metrics, DNS-SD,
+current `zpl-agent` binary and installation paths retain their historical names
+for packaging compatibility while deployments migrate. Its first production
+driver supports FIFO-controlled Zebra ZPL II printers exposed as character
+devices. It provides REST/JSON, Prometheus metrics, DNS-SD,
 and an optional built-in WebUI for persistent device settings and loaded media.
 There is no database server, CUPS/IPP, port 9100 listener, or automatic retry.
 
