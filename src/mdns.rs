@@ -24,16 +24,21 @@ pub fn announce(config: &Config) -> Result<Option<MdnsGuard>> {
     agent_props.insert("api_version".into(), "v1".into());
     agent_props.insert("rest_path".into(), "/v1".into());
     agent_props.insert("metrics_path".into(), "/metrics".into());
-    let agent = ServiceInfo::new(
-        "_zpl-agent._tcp.local.",
-        &instance_name("zpl-agent", agent_id),
-        &host,
-        "0.0.0.0",
-        port,
-        agent_props,
-    )?
-    .enable_addr_auto();
-    daemon.register(agent)?;
+    for (service_type, prefix) in [
+        ("_print-agent._tcp.local.", "print-agent"),
+        ("_zpl-agent._tcp.local.", "zpl-agent"),
+    ] {
+        let agent = ServiceInfo::new(
+            service_type,
+            &instance_name(prefix, agent_id),
+            &host,
+            "0.0.0.0",
+            port,
+            agent_props.clone(),
+        )?
+        .enable_addr_auto();
+        daemon.register(agent)?;
+    }
     for p in &config.printers {
         let mut props = HashMap::new();
         props.insert("agent_id".to_string(), agent_id.to_string());
@@ -46,6 +51,7 @@ pub fn announce(config: &Config) -> Result<Option<MdnsGuard>> {
         props.insert("metrics_path".to_string(), "/metrics".to_string());
         props.insert("printer_id".to_string(), p.id.clone());
         props.insert("transport".to_string(), p.transport.clone());
+        props.insert("driver".to_string(), p.driver.clone());
         let info = ServiceInfo::new(
             "_zpl-printer._tcp.local.",
             &instance_name("zpl-printer", &format!("{agent_id}:{}", p.id)),

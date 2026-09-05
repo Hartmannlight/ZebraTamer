@@ -1,9 +1,18 @@
-# zpl-agent
+# PrintAgent (ZebraTamer compatibility)
 
-`zpl-agent` is a small Linux service for FIFO-controlled Zebra ZPL II printers
+PrintAgent is a small Linux edge service for locally attached printers. The
+current `zpl-agent` binary and ZebraTamer API names remain compatibility aliases
+while deployments migrate. Its first production driver supports FIFO-controlled
+Zebra ZPL II printers
 exposed as character devices. It provides REST/JSON, Prometheus metrics, DNS-SD,
 and an optional built-in WebUI for persistent device settings and loaded media.
 There is no database server, CUPS/IPP, port 9100 listener, or automatic retry.
+
+PrinterFleet is the global source of truth and forwards immutable device
+payloads with `X-Idempotency-Key`. Reusing the same key and payload returns the
+original agent job; reusing it for another printer or payload returns HTTP 409.
+The configured `driver = "zpl"` is explicit so a future Niimbot driver can add
+its own encoder and USB/Bluetooth transport without changing Fleet or PrintHub.
 
 ## Optional WebUI and persistent printer settings
 

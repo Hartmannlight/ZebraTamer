@@ -252,6 +252,8 @@ pub struct Job {
     pub label_count_source: Option<String>,
     pub origin: Option<String>,
     pub description: Option<String>,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
     pub sha256: Option<String>,
     pub bytes: u64,
     pub payload_path: Option<PathBuf>,

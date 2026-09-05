@@ -119,6 +119,7 @@ async fn main() -> Result<()> {
         store,
         workers,
         started: now(),
+        idempotency_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     tracing::info!(address=%config.listen,"zpl-agent listening");

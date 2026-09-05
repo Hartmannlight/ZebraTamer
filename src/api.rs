@@ -34,6 +34,7 @@ pub struct AppState {
     pub store: Store,
     pub workers: Arc<HashMap<String, WorkerHandle>>,
     pub started: chrono::DateTime<chrono::Utc>,
+    pub idempotency_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -88,7 +89,7 @@ pub fn router(state: AppState) -> Router {
 
 async fn root() -> Json<Envelope<Value>> {
     Json(Envelope::ok(
-        json!({"service":"zpl-agent","api_version":"v1"}),
+        json!({"service":"print-agent","compatibility_service":"zpl-agent","api_version":"v1"}),
     ))
 }
 async fn health() -> Json<Envelope<Value>> {
@@ -116,6 +117,7 @@ struct PrinterItem {
     id: String,
     display_name: String,
     transport: String,
+    driver: String,
     device: String,
 }
 async fn printers(State(s): State<AppState>) -> Json<Envelope<Vec<PrinterItem>>> {
@@ -127,6 +129,7 @@ async fn printers(State(s): State<AppState>) -> Json<Envelope<Vec<PrinterItem>>>
                 id: p.id.clone(),
                 display_name: p.display_name.clone(),
                 transport: p.transport.clone(),
+                driver: p.driver.clone(),
                 device: p.device.display().to_string(),
             })
             .collect(),
@@ -190,6 +193,12 @@ async fn create_job(
             "content_type_must_be_application_zpl",
         ));
     }
+    let idempotency_key = header_string(&headers, "x-idempotency-key");
+    if idempotency_key.as_ref().is_some_and(|value| value.is_empty() || value.len() > 255) {
+        return Err(ApiResponseError::bad_request(
+            "x-idempotency-key must contain between 1 and 255 characters",
+        ));
+    }
     let id = Uuid::new_v4();
     let part = s.store.spool_path(id);
     let final_path = s.store.payload_path(id);
@@ -207,15 +216,13 @@ async fn create_job(
         label_count_source: count_header.map(|_| "header".into()),
         origin: header_string(&headers, "x-zpl-origin"),
         description: header_string(&headers, "x-zpl-description"),
+        idempotency_key: None,
         sha256: None,
         bytes: 0,
         payload_path: None,
         error: None,
     };
     s.store.save_job(&job).map_err(ApiResponseError::internal)?;
-    s.store
-        .register_job(id)
-        .map_err(ApiResponseError::internal)?;
     let mut file = match fs::File::create(&part).await {
         Ok(file) => file,
         Err(error) => return Err(fail_receiving(&s.store, &mut job, error)),
@@ -260,7 +267,27 @@ async fn create_job(
     job.sha256 = Some(format!("{:x}", sha.finalize()));
     job.bytes = bytes;
     job.payload_path = Some(final_path);
+    job.idempotency_key = idempotency_key.clone();
+    let _idempotency_guard = s.idempotency_lock.lock().await;
+    if let Some(key) = idempotency_key.as_deref() {
+        if let Some(existing) = s
+            .store
+            .find_job_by_idempotency_key(key, id)
+            .map_err(ApiResponseError::internal)?
+        {
+            s.store.remove_unregistered_job(id);
+            if existing.printer_id == printer_id && existing.sha256 == job.sha256 {
+                return Ok((StatusCode::ACCEPTED, Json(Envelope::ok(existing))));
+            }
+            return Err(ApiResponseError::conflict(
+                "idempotency_key_reused_for_different_job",
+            ));
+        }
+    }
     s.store.save_job(&job).map_err(ApiResponseError::internal)?;
+    s.store
+        .register_job(id)
+        .map_err(ApiResponseError::internal)?;
     let event = s.store.next_event(
         "job_queued",
         Some(printer_id),
@@ -563,6 +590,9 @@ impl ApiResponseError {
     }
     fn unavailable(m: impl Into<String>) -> Self {
         Self::new(StatusCode::SERVICE_UNAVAILABLE, "unavailable", m)
+    }
+    fn conflict(m: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, "conflict", m)
     }
     fn internal(e: impl std::fmt::Display) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string())

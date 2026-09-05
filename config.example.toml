@@ -22,6 +22,7 @@ id = "schildkrote"
 display_name = "Zebra T402 Schildkröte"
 device = "/dev/usb/lp0"
 transport = "char_device"
+driver = "zpl"
 model_hint = "Zebra T402"
 first_byte_timeout_ms = 5000
 idle_timeout_ms = 500

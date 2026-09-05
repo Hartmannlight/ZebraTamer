@@ -110,6 +110,11 @@ impl Config {
                 "unsupported transport {:?}",
                 printer.transport
             );
+            anyhow::ensure!(
+                printer.driver == "zpl",
+                "unsupported driver {:?}",
+                printer.driver
+            );
         }
         Ok(())
     }
@@ -243,6 +248,7 @@ pub struct PrinterConfig {
     pub display_name: String,
     pub device: PathBuf,
     pub transport: String,
+    pub driver: String,
     pub model_hint: Option<String>,
     pub device_profile: crate::device::DeviceProfile,
     pub first_byte_timeout_ms: u64,
@@ -257,6 +263,7 @@ impl Default for PrinterConfig {
             display_name: String::new(),
             device: PathBuf::new(),
             transport: "char_device".into(),
+            driver: "zpl".into(),
             model_hint: None,
             device_profile: Default::default(),
             first_byte_timeout_ms: 3000,

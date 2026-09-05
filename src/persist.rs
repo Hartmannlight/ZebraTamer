@@ -45,6 +45,29 @@ impl Store {
     pub fn register_job(&self, id: Uuid) -> Result<()> {
         append_ndjson(&self.root.join("jobs.ndjson"), &id)
     }
+    pub fn find_job_by_idempotency_key(&self, key: &str, exclude: Uuid) -> Result<Option<Job>> {
+        for entry in fs::read_dir(self.root.join("jobs"))? {
+            let path = entry?.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(job): Result<Job, _> = read_json(&path) else {
+                continue;
+            };
+            if job.id != exclude
+                && job.sha256.is_some()
+                && job.idempotency_key.as_deref() == Some(key)
+            {
+                return Ok(Some(job));
+            }
+        }
+        Ok(None)
+    }
+    pub fn remove_unregistered_job(&self, id: Uuid) {
+        let _ = fs::remove_file(self.job_path(id));
+        let _ = fs::remove_file(self.payload_path(id));
+        let _ = fs::remove_file(self.spool_path(id));
+    }
     pub fn list_jobs_page(&self, cursor: usize, limit: usize) -> Result<Vec<Job>> {
         let mut out = Vec::with_capacity(limit.min(256));
         let index = match File::open(self.root.join("jobs.ndjson")) {
@@ -259,6 +282,7 @@ mod tests {
             label_count_source: None,
             origin: None,
             description: None,
+            idempotency_key: None,
             sha256: None,
             bytes: 42,
             payload_path: None,
@@ -290,5 +314,31 @@ mod tests {
         atomic_json(&path, &serde_json::json!({"ready":true})).unwrap();
         let value: Value = read_json(&path).unwrap();
         assert_eq!(value["ready"], true);
+    }
+
+    #[test]
+    fn idempotency_lookup_ignores_incomplete_and_excluded_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let mut completed = job(JobState::Queued);
+        completed.idempotency_key = Some("fleet-1".into());
+        completed.sha256 = Some("abc".into());
+        store.save_job(&completed).unwrap();
+        let mut receiving = job(JobState::Receiving);
+        receiving.idempotency_key = Some("fleet-1".into());
+        store.save_job(&receiving).unwrap();
+
+        assert_eq!(
+            store
+                .find_job_by_idempotency_key("fleet-1", receiving.id)
+                .unwrap()
+                .unwrap()
+                .id,
+            completed.id
+        );
+        assert!(store
+            .find_job_by_idempotency_key("fleet-1", completed.id)
+            .unwrap()
+            .is_none());
     }
 }
