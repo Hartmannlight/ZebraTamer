@@ -517,35 +517,6 @@ fn configuration_value(line: &str, label: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-#[cfg(test)]
-mod parse_tests {
-    use super::*;
-
-    #[test]
-    fn configuration_identity_is_parsed_without_exposing_transport_configuration() {
-        let snapshot = Arc::new(RwLock::new(PrinterSnapshot::new("printer".into())));
-        parse_known(
-            "configuration",
-            b"  448 8/MM FULL       RESOLUTION\r\n  V61.17.5Z <-        FIRMWARE\r\n  V20.00.0            HARDWARE ID\r\n  TEST-SERIAL-1234    SERIAL NUMBER\r\n",
-            &snapshot,
-        );
-        let current = snapshot.read().unwrap();
-        assert_eq!(
-            current.identity.firmware.value.as_deref(),
-            Some("V61.17.5Z")
-        );
-        assert_eq!(
-            current.identity.hardware_id.value.as_deref(),
-            Some("V20.00.0")
-        );
-        assert_eq!(
-            current.identity.serial_number.value.as_deref(),
-            Some("TEST-SERIAL-1234")
-        );
-        assert_eq!(current.identity.resolution_dpi.value, Some(203));
-    }
-}
-
 fn process_job(
     id: Uuid,
     config: &PrinterConfig,
@@ -643,4 +614,33 @@ fn consume_media(store: &Store, config: &PrinterConfig, job: &crate::model::Job)
 fn emit(store: &Store, kind: &str, config: &PrinterConfig, id: Uuid, data: serde_json::Value) {
     let e = store.next_event(kind, Some(config.id.clone()), Some(id), data);
     let _ = store.append_event(&e);
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::*;
+
+    #[test]
+    fn configuration_identity_is_parsed_without_exposing_transport_configuration() {
+        let snapshot = Arc::new(RwLock::new(PrinterSnapshot::new("printer".into())));
+        parse_known(
+            "configuration",
+            b"  448 8/MM FULL       RESOLUTION\r\n  V61.17.5Z <-        FIRMWARE\r\n  V20.00.0            HARDWARE ID\r\n  TEST-SERIAL-1234    SERIAL NUMBER\r\n",
+            &snapshot,
+        );
+        let current = snapshot.read().unwrap();
+        assert_eq!(
+            current.identity.firmware.value.as_deref(),
+            Some("V61.17.5Z")
+        );
+        assert_eq!(
+            current.identity.hardware_id.value.as_deref(),
+            Some("V20.00.0")
+        );
+        assert_eq!(
+            current.identity.serial_number.value.as_deref(),
+            Some("TEST-SERIAL-1234")
+        );
+        assert_eq!(current.identity.resolution_dpi.value, Some(203));
+    }
 }
