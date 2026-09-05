@@ -2,7 +2,7 @@ use crate::{
     config::{HardwareCounterPolicy, PrinterConfig, StorageMode},
     model::{now, JobState, Observed, PrinterSnapshot, RawResponse},
     persist::Store,
-    transport::{CharDeviceTransport, PrinterTransport},
+    transport::{self, PrinterTransport},
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::json;
@@ -44,7 +44,7 @@ type ControlOperation = Box<
             &PrinterConfig,
             &Store,
             &Arc<RwLock<PrinterSnapshot>>,
-            &mut Option<CharDeviceTransport>,
+            &mut Option<Box<dyn PrinterTransport>>,
         ) -> Result<serde_json::Value, String>
         + Send,
 >;
@@ -83,7 +83,7 @@ impl WorkerHandle {
                 &PrinterConfig,
                 &Store,
                 &Arc<RwLock<PrinterSnapshot>>,
-                &mut Option<CharDeviceTransport>,
+                &mut Option<Box<dyn PrinterTransport>>,
             ) -> Result<serde_json::Value, String>
             + Send
             + 'static,
@@ -101,8 +101,9 @@ impl WorkerHandle {
     pub async fn read_device(&self) -> Result<serde_json::Value, String> {
         self.control(|config, store, snapshot, transport| {
             ensure_transport(config, transport, snapshot)?;
-            let observed = crate::device::read_configuration(transport.as_mut().unwrap(), config)
-                .map_err(|e| e.to_string())?;
+            let observed =
+                crate::device::read_configuration(transport.as_mut().unwrap().as_mut(), config)
+                    .map_err(|e| e.to_string())?;
             crate::persist::atomic_json(
                 &store.printer_dir(&config.id).join("configuration.json"),
                 &observed,
@@ -119,8 +120,13 @@ impl WorkerHandle {
     ) -> Result<serde_json::Value, String> {
         self.control(move |config, store, snapshot, transport| {
             ensure_transport(config, transport, snapshot)?;
-            crate::device::save_configuration(transport.as_mut().unwrap(), config, store, &request)
-                .map_err(|e| e.to_string())
+            crate::device::save_configuration(
+                transport.as_mut().unwrap().as_mut(),
+                config,
+                store,
+                &request,
+            )
+            .map_err(|e| e.to_string())
         })
         .await
     }
@@ -188,7 +194,7 @@ fn run(
     rx: Receiver<Command>,
 ) {
     let mut queue: VecDeque<Uuid> = store.load_queue(&config.id).unwrap_or_default().into();
-    let mut transport: Option<CharDeviceTransport> = None;
+    let mut transport: Option<Box<dyn PrinterTransport>> = None;
     let mut ever_connected = false;
     let mut disconnected_at: Option<std::time::Instant> = None;
     loop {
@@ -285,11 +291,11 @@ fn apply_reconnect_loss(config: &PrinterConfig, store: &Store, count: u64) {
 
 fn ensure_transport(
     config: &PrinterConfig,
-    transport: &mut Option<CharDeviceTransport>,
+    transport: &mut Option<Box<dyn PrinterTransport>>,
     snapshot: &Arc<RwLock<PrinterSnapshot>>,
 ) -> Result<(), String> {
     if transport.is_none() {
-        match CharDeviceTransport::open(config) {
+        match transport::open(config) {
             Ok(t) => {
                 *transport = Some(t);
                 let mut s = snapshot.write().unwrap();
@@ -312,7 +318,7 @@ fn probe(
     config: &PrinterConfig,
     store: &Store,
     snapshot: &Arc<RwLock<PrinterSnapshot>>,
-    transport: &mut Option<CharDeviceTransport>,
+    transport: &mut Option<Box<dyn PrinterTransport>>,
     capability_probe: bool,
     hardware_counters: HardwareCounterPolicy,
 ) -> Result<(), String> {
@@ -477,13 +483,66 @@ fn parse_known(name: &str, bytes: &[u8], snapshot: &Arc<RwLock<PrinterSnapshot>>
     if name == "configuration" {
         for line in text.lines() {
             let l = line.trim();
-            if l.to_ascii_lowercase().contains("firmware") {
-                s.identity.firmware = Observed::value(l.to_string(), None, "^HH");
+            if let Some(value) = configuration_value(l, "FIRMWARE") {
+                s.identity.firmware =
+                    Observed::value(value.trim_end_matches("<-").trim().to_string(), None, "^HH");
             }
-            if l.to_ascii_lowercase().contains("zebra") {
-                s.identity.model = Observed::value(l.to_string(), None, "^HH");
+            if let Some(value) = configuration_value(l, "HARDWARE ID") {
+                s.identity.hardware_id = Observed::value(value, None, "^HH");
+            }
+            if let Some(value) = configuration_value(l, "SERIAL NUMBER") {
+                s.identity.serial_number = Observed::value(value, None, "^HH");
+            }
+            if let Some(value) = configuration_value(l, "RESOLUTION") {
+                if let Some(dpmm) = value
+                    .split_whitespace()
+                    .find_map(|word| word.strip_suffix("/MM"))
+                    .and_then(|value| value.parse::<f64>().ok())
+                {
+                    s.identity.resolution_dpi =
+                        Observed::value((dpmm * 25.4).round() as u64, Some("dpi"), "^HH");
+                }
             }
         }
+    }
+}
+
+fn configuration_value(line: &str, label: &str) -> Option<String> {
+    let clean =
+        line.trim_matches(|character: char| character.is_control() || character.is_whitespace());
+    let upper = clean.to_ascii_uppercase();
+    upper
+        .strip_suffix(label)
+        .map(|prefix| clean[..prefix.len()].trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::*;
+
+    #[test]
+    fn configuration_identity_is_parsed_without_exposing_transport_configuration() {
+        let snapshot = Arc::new(RwLock::new(PrinterSnapshot::new("printer".into())));
+        parse_known(
+            "configuration",
+            b"  448 8/MM FULL       RESOLUTION\r\n  V61.17.5Z <-        FIRMWARE\r\n  V20.00.0            HARDWARE ID\r\n  TEST-SERIAL-1234    SERIAL NUMBER\r\n",
+            &snapshot,
+        );
+        let current = snapshot.read().unwrap();
+        assert_eq!(
+            current.identity.firmware.value.as_deref(),
+            Some("V61.17.5Z")
+        );
+        assert_eq!(
+            current.identity.hardware_id.value.as_deref(),
+            Some("V20.00.0")
+        );
+        assert_eq!(
+            current.identity.serial_number.value.as_deref(),
+            Some("TEST-SERIAL-1234")
+        );
+        assert_eq!(current.identity.resolution_dpi.value, Some(203));
     }
 }
 
@@ -493,7 +552,7 @@ fn process_job(
     store: &Store,
     storage: StorageMode,
     snapshot: &Arc<RwLock<PrinterSnapshot>>,
-    transport: &mut Option<CharDeviceTransport>,
+    transport: &mut Option<Box<dyn PrinterTransport>>,
 ) {
     let Ok(mut job) = store.load_job(id) else {
         return;

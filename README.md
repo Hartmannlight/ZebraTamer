@@ -142,9 +142,21 @@ SHA-256 file to `dist/armv7-local`, and requires no Rust installation on either
 Windows or the Pi. Copy the binary to the Pi and atomically replace
 `/usr/local/bin/zpl-agent`; keep the service running natively under systemd.
 
-Pass the device through only on a Linux Docker host, for example
-`--device=/dev/usb/lp0`. Native systemd deployment is recommended on the
-Raspberry Pi because it simplifies device permissions and mDNS.
+On a Linux Docker host with `usblp`, pass the character device through as
+`--device=/dev/usb/lp0`. If that kernel module is unavailable, configure
+`transport = "usb_bulk"` with the exact USB vendor ID, product ID and serial,
+then pass the matching `/dev/bus/usb/<bus>/<device>` node. The agent discovers
+the printer-class bulk endpoints from its USB descriptors and refuses an
+ambiguous VID/PID match unless a serial is configured.
+
+Docker Desktop does not provide direct host-USB passthrough. Attach the device
+to its Linux VM with USB/IP first, following
+[Docker's USB/IP guide](https://docs.docker.com/desktop/features/usbip/) or the
+[Microsoft WSL usbipd-win guide](https://learn.microsoft.com/windows/wsl/connect-usb).
+Give the agent's numeric group (999 in the published image) access only to that
+device node; do not run PrintHub or PrinterFleet privileged. Native systemd
+deployment remains recommended on a Raspberry Pi because it simplifies stable
+udev permissions and mDNS.
 
 ## API notes
 

@@ -105,11 +105,17 @@ impl Config {
                 "duplicate printer id {:?}",
                 printer.id
             );
-            anyhow::ensure!(
-                printer.transport == "char_device",
-                "unsupported transport {:?}",
-                printer.transport
-            );
+            match printer.transport.as_str() {
+                "char_device" => anyhow::ensure!(
+                    !printer.device.as_os_str().is_empty(),
+                    "char_device transport requires device"
+                ),
+                "usb_bulk" => anyhow::ensure!(
+                    printer.usb_vendor_id.is_some() && printer.usb_product_id.is_some(),
+                    "usb_bulk transport requires usb_vendor_id and usb_product_id"
+                ),
+                _ => anyhow::bail!("unsupported transport {:?}", printer.transport),
+            }
             let driver = crate::driver::descriptor(&printer.driver)
                 .ok_or_else(|| anyhow::anyhow!("unsupported driver {:?}", printer.driver))?;
             anyhow::ensure!(
@@ -228,6 +234,40 @@ mod identity_tests {
     }
 }
 
+#[cfg(test)]
+mod transport_config_tests {
+    use super::*;
+
+    #[test]
+    fn usb_bulk_requires_an_explicit_device_identity() {
+        let mut config = Config::default();
+        config.printers.push(PrinterConfig {
+            id: "usb-zebra".into(),
+            transport: "usb_bulk".into(),
+            driver: "zpl".into(),
+            ..PrinterConfig::default()
+        });
+        assert!(config.validate().is_err());
+
+        config.printers[0].usb_vendor_id = Some(0x0a5f);
+        config.printers[0].usb_product_id = Some(0x00a3);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn char_device_still_requires_a_path() {
+        let mut config = Config::default();
+        config.printers.push(PrinterConfig {
+            id: "local-zebra".into(),
+            driver: "zpl".into(),
+            ..PrinterConfig::default()
+        });
+        assert!(config.validate().is_err());
+        config.printers[0].device = "/dev/usb/lp0".into();
+        assert!(config.validate().is_ok());
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StorageMode {
@@ -250,6 +290,9 @@ pub struct PrinterConfig {
     pub display_name: String,
     pub device: PathBuf,
     pub transport: String,
+    pub usb_vendor_id: Option<u16>,
+    pub usb_product_id: Option<u16>,
+    pub usb_serial: Option<String>,
     pub driver: String,
     pub model_hint: Option<String>,
     pub device_profile: crate::device::DeviceProfile,
@@ -265,6 +308,9 @@ impl Default for PrinterConfig {
             display_name: String::new(),
             device: PathBuf::new(),
             transport: "char_device".into(),
+            usb_vendor_id: None,
+            usb_product_id: None,
+            usb_serial: None,
             driver: "zpl".into(),
             model_hint: None,
             device_profile: Default::default(),
