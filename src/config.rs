@@ -110,9 +110,11 @@ impl Config {
                 "unsupported transport {:?}",
                 printer.transport
             );
+            let driver = crate::driver::descriptor(&printer.driver)
+                .ok_or_else(|| anyhow::anyhow!("unsupported driver {:?}", printer.driver))?;
             anyhow::ensure!(
-                printer.driver == "zpl",
-                "unsupported driver {:?}",
+                driver.available,
+                "driver {:?} is reserved but not implemented by this agent build",
                 printer.driver
             );
         }

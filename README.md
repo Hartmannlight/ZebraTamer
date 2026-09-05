@@ -13,6 +13,9 @@ payloads with `X-Idempotency-Key`. Reusing the same key and payload returns the
 original agent job; reusing it for another printer or payload returns HTTP 409.
 The configured `driver = "zpl"` is explicit so a future Niimbot driver can add
 its own encoder and USB/Bluetooth transport without changing Fleet or PrintHub.
+`GET /v1/drivers` exposes active and reserved payload contracts. The
+`niimbot_b1` slot is intentionally reported as unavailable until its framing,
+compression and real-hardware behavior are implemented and tested.
 
 ## Optional WebUI and persistent printer settings
 

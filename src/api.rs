@@ -44,6 +44,7 @@ pub fn router(state: AppState) -> Router {
         .route("/metrics", get(prometheus))
         .route("/v1/agent", get(agent))
         .route("/v1/printers", get(printers))
+        .route("/v1/drivers", get(drivers))
         .route("/v1/printers/{id}", get(printer))
         .route("/v1/printers/{id}/snapshot", get(snapshot))
         .route("/v1/printers/{id}/capabilities", get(capabilities))
@@ -135,6 +136,19 @@ async fn printers(State(s): State<AppState>) -> Json<Envelope<Vec<PrinterItem>>>
             .collect(),
     ))
 }
+
+async fn drivers() -> Json<Envelope<Value>> {
+    Json(Envelope::ok(json!(crate::driver::DRIVERS
+        .iter()
+        .map(|driver| json!({
+            "id": driver.id,
+            "accepted_mime_types": driver.accepted_mime_types,
+            "available": driver.available,
+            "device_configuration": driver.device_configuration,
+            "status_probe": driver.status_probe,
+        }))
+        .collect::<Vec<_>>())))
+}
 fn worker<'a>(s: &'a AppState, id: &str) -> Result<&'a WorkerHandle, ApiResponseError> {
     s.workers
         .get(id)
@@ -188,9 +202,20 @@ async fn create_job(
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if !content.starts_with("application/zpl") {
+    let driver = crate::driver::descriptor(&w.config.driver)
+        .ok_or_else(|| ApiResponseError::unavailable("configured_driver_is_unknown"))?;
+    if !driver.available {
+        return Err(ApiResponseError::unavailable(
+            "configured_driver_is_not_available",
+        ));
+    }
+    if !driver.accepts(content) {
         return Err(ApiResponseError::bad_request(
-            "content_type_must_be_application_zpl",
+            format!(
+                "content type must match driver {}; accepted: {}",
+                driver.id,
+                driver.accepted_mime_types.join(", ")
+            ),
         ));
     }
     let idempotency_key = header_string(&headers, "x-idempotency-key");
@@ -254,11 +279,13 @@ async fn create_job(
     }
     let (label_count, label_count_source) = if count_header.is_some() {
         (count_header, Some("header".into()))
-    } else {
+    } else if driver.id == "zpl" {
         (
             parse_pq(&final_path).await,
             Some("zpl_pq_best_effort".into()),
         )
+    } else {
+        (None, None)
     };
     job.state = JobState::Queued;
     job.updated_at = now();

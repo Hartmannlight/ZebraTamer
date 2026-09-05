@@ -1,6 +1,7 @@
 mod api;
 mod config;
 mod device;
+mod driver;
 mod mdns;
 mod media;
 mod metrics;
