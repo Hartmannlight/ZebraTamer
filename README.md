@@ -178,6 +178,12 @@ the complete request in memory. List endpoints accept `cursor` and `limit` (up t
 different printers operate concurrently. Metrics use cached snapshots and never
 perform printer I/O.
 
+Restart recovery is deliberately conservative. Queued jobs resume, interrupted
+uploads fail, and jobs interrupted while writing or verifying become
+`outcome_unknown`; none of those uncertain deliveries is replayed automatically.
+Jobs already persisted as `transport_accepted` remain terminal across restarts,
+so an idempotent retry observes the accepted result instead of printing twice.
+
 Probe commands include the T402-compatible `~HS`, `~HD`, `~HM`, `~HB`, `^HH`, and
 the R/E/B/Z directory queries. Optional SGD, `~HQ`, and odometer commands are
 reported as supported only after a response; an offline timeout remains

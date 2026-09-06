@@ -104,10 +104,7 @@ impl Store {
                 self.save_job(&job)?;
                 continue;
             }
-            if matches!(
-                job.state,
-                JobState::Writing | JobState::Verifying | JobState::TransportAccepted
-            ) {
+            if matches!(job.state, JobState::Writing | JobState::Verifying) {
                 job.state = JobState::OutcomeUnknown;
                 job.updated_at = now();
                 job.error = Some("agent_restarted_during_delivery".into());
@@ -291,12 +288,14 @@ mod tests {
     }
 
     #[test]
-    fn recovery_never_requeues_an_in_flight_delivery() {
+    fn recovery_preserves_terminal_jobs_and_never_requeues_in_flight_delivery() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().into()).unwrap();
         let writing = job(JobState::Writing);
+        let accepted = job(JobState::TransportAccepted);
         let queued = job(JobState::Queued);
         store.save_job(&writing).unwrap();
+        store.save_job(&accepted).unwrap();
         store.save_job(&queued).unwrap();
         let recovered = store.recover_jobs().unwrap();
         assert_eq!(recovered.len(), 1);
@@ -304,6 +303,10 @@ mod tests {
         assert_eq!(
             store.load_job(writing.id).unwrap().state,
             JobState::OutcomeUnknown
+        );
+        assert_eq!(
+            store.load_job(accepted.id).unwrap().state,
+            JobState::TransportAccepted
         );
     }
 
