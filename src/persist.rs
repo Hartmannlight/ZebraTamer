@@ -37,6 +37,7 @@ impl Store {
             .create(true)
             .read(true)
             .write(true)
+            .truncate(false)
             .open(&lock_path)
             .with_context(|| format!("opening writer lock {}", lock_path.display()))?;
         let result = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };

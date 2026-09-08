@@ -10,6 +10,8 @@ import tempfile
 import time
 import urllib.request
 
+ADMIN_TOKEN = "container-smoke-admin-token"
+
 
 def run(*args: str) -> str:
     return subprocess.check_output(args, text=True).strip()
@@ -27,7 +29,8 @@ def main() -> None:
             'listen = "0.0.0.0:8080"\n'
             'data_dir = "/var/lib/zpl-agent"\n'
             'storage_mode = "metadata_only"\n'
-            'mdns_enabled = false\n',
+            'mdns_enabled = false\n'
+            f'admin_token = "{ADMIN_TOKEN}"\n',
             encoding="utf-8",
         )
         container = run(
@@ -53,9 +56,11 @@ def main() -> None:
             deadline = time.monotonic() + 60
             while True:
                 try:
-                    with urllib.request.urlopen(
-                        f"http://{host}:{port}/v1/agent", timeout=2
-                    ) as response:
+                    request = urllib.request.Request(
+                        f"http://{host}:{port}/v1/agent",
+                        headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
+                    )
+                    with urllib.request.urlopen(request, timeout=2) as response:
                         document = json.load(response)
                         if response.status == 200 and document.get("data"):
                             break
