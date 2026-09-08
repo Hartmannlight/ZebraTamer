@@ -8,14 +8,20 @@ devices. It provides REST/JSON, Prometheus metrics, DNS-SD,
 and an optional built-in WebUI for persistent device settings and loaded media.
 There is no database server, CUPS/IPP, port 9100 listener, or automatic retry.
 
-PrinterFleet is the global source of truth and forwards immutable device
-payloads with `X-Idempotency-Key`. Reusing the same key and payload returns the
-original agent job; reusing it for another printer or payload returns HTTP 409.
-The configured `driver = "zpl"` is explicit so a future Niimbot driver can add
-its own encoder and USB/Bluetooth transport without changing Fleet or PrintHub.
-`GET /v1/drivers` exposes active and reserved payload contracts. The
-`niimbot_b1` slot is intentionally reported as unavailable until its framing,
-compression and real-hardware behavior are implemented and tested.
+The same service can own directly reachable Zebra printers over RAW TCP. Set
+`transport = "tcp"`, `tcp_host` and optionally `tcp_port` (default 9100) for a
+network printer. ZebraTamer is a TCP client; it does not expose a raw port 9100
+listener. USB, TCP, status, configuration and jobs use the same per-printer
+worker so device operations cannot interleave.
+
+Callers forward immutable device payloads with `X-Idempotency-Key`. Reusing the
+same key and payload returns the original job; reusing it for another printer
+or payload returns HTTP 409. The Zebra driver accepts native `application/zpl`
+and PrintHub's `application/vnd.printhub.raster-page+json` monochrome page
+format. Raster dimensions, DPI, row padding and configured device bounds are
+checked before a job enters the hardware queue. ZebraTamer wraps accepted
+pixels in `^GF`; it does not scale, rotate or dither them. Other device families
+use separate services implementing the common PrintHub print-service contract.
 
 ## Optional WebUI and persistent printer settings
 
@@ -142,6 +148,18 @@ SHA-256 file to `dist/armv7-local`, and requires no Rust installation on either
 Windows or the Pi. Copy the binary to the Pi and atomically replace
 `/usr/local/bin/zpl-agent`; keep the service running natively under systemd.
 
+Build the native 64-bit ARM artifact used by Raspberry Pi OS/Debian arm64:
+
+```powershell
+./scripts/build-aarch64.ps1
+```
+
+For a memory-constrained Pi, use the files under `deploy/native` instead of
+installing Docker. Put the architecture-matching binary beside those files,
+copy `config.usb.toml.example` to `config.toml`, review the USB identity, then
+run `sudo ./install-local.sh`. Main-branch and tagged releases also contain a
+ready-to-unpack `zebratamer-native-aarch64-unknown-linux-gnu.tar.gz` bundle.
+
 On a Linux Docker host with `usblp`, pass the character device through as
 `--device=/dev/usb/lp0`. If that kernel module is unavailable, configure
 `transport = "usb_bulk"` with the exact USB vendor ID, product ID and serial,
@@ -154,7 +172,7 @@ to its Linux VM with USB/IP first, following
 [Docker's USB/IP guide](https://docs.docker.com/desktop/features/usbip/) or the
 [Microsoft WSL usbipd-win guide](https://learn.microsoft.com/windows/wsl/connect-usb).
 Give the agent's numeric group (999 in the published image) access only to that
-device node; do not run PrintHub or PrinterFleet privileged. Native systemd
+device node; do not run PrintHub or unrelated product services privileged. Native systemd
 deployment remains recommended on a Raspberry Pi because it simplifies stable
 udev permissions and mDNS.
 
@@ -192,7 +210,12 @@ reported as supported only after a response; an offline timeout remains
 
 ## Automated maintenance and releases
 
-Push to main creates an immutable prerelease build-SHA-rRUN-ATTEMPT. Exact vMAJOR.MINOR.PATCH tags create immutable stable releases. No agent container is published. ARM64/AMD64 run native PTY integration tests on Debian Bookworm; ARMv7 is cross-compiled and is not runtime-tested.
+Push to main creates an immutable prerelease build-SHA-rRUN-ATTEMPT, publishes
+validated native bundles, and publishes an attested AMD64/ARM64 container as an
+immutable build tag plus `ghcr.io/hartmannlight/print-agent:latest`. Exact
+vMAJOR.MINOR.PATCH tags create immutable stable release and container tags.
+ARM64/AMD64 run native PTY integration tests on Debian Bookworm; ARMv7 is
+cross-compiled and is not runtime-tested.
 
 See [policy](docs/SECURITY_RELEASE_POLICY.md), [required owner setup](docs/MANUAL_GITHUB_SETUP.md) and [rollback](docs/ROLLBACK.md).
 Renovate auto-merge remains blocked until protected-branch checks are verified. No deployment automation is installed.

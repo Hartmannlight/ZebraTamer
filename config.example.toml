@@ -4,7 +4,13 @@ storage_mode = "full"
 # Optional browser UI at /ui/. Generate your own token (at least 24 characters).
 # Device writes always require this token; when set, media writes require it too.
 webui_enabled = false
+# Optional separate v2 credentials. Admin may also read and print; print may also read.
+# read_token = "replace-with-a-long-random-read-token"
+# read_token_file = "/run/secrets/zebratamer-read-token"
+# print_token = "replace-with-a-long-random-print-token"
+# print_token_file = "/run/secrets/zebratamer-print-token"
 # admin_token = "replace-with-a-long-random-token"
+# admin_token_file = "/run/secrets/zebratamer-admin-token"
 # Optional: set a permanent, globally unique identity. If omitted, a UUID is
 # generated once and stored in data_dir/agent-id. Back up that file with the data.
 # agent_id = "workshop-pi"
@@ -15,11 +21,14 @@ host_boot_loss_labels = 2
 printer_reconnect_loss_labels = 2
 calibration_loss_labels = 0
 reconnect_debounce_secs = 5
+max_job_bytes = 8388608
+max_active_jobs_per_printer = 1000
 hardware_counters = "prefer"
 
 [[printers]]
 id = "schildkrote"
 display_name = "Zebra T402 Schildkröte"
+enabled = true
 device = "/dev/usb/lp0"
 transport = "char_device"
 driver = "zpl"
@@ -36,6 +45,16 @@ write_timeout_ms = 30000
 # usb_vendor_id = 2655
 # usb_product_id = 163
 # usb_serial = "replace-with-the-exact-usb-serial"
+
+# For an Ethernet/WLAN Zebra reachable via RAW TCP/JetDirect, replace the
+# transport and set its address. Port 9100 is the default. `device` and USB
+# identity fields are ignored for this transport.
+# transport = "tcp"
+# device = ""
+# tcp_host = "192.0.2.10"
+# tcp_port = 9100
+# connect_timeout_ms = 3000
+# max_response_bytes = 1048576
 
 # Confirm these limits against YOUR printer's manual before enabling device writes.
 # Unsupported options remain disabled in the UI. DPI is a hardware fact, not a setting.

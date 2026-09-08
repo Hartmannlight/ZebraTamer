@@ -7,6 +7,7 @@ mod media;
 mod metrics;
 mod model;
 mod persist;
+mod protocol_v2;
 mod transport;
 mod webui;
 mod worker;
@@ -15,7 +16,14 @@ use clap::Parser;
 use config::Config;
 use model::{now, AccountingConfidence, MediaLedgerEvent};
 use persist::Store;
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    io::{Read, Write},
+    net::TcpStream,
+    path::PathBuf,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -29,6 +37,9 @@ struct Args {
     config: PathBuf,
     #[arg(long)]
     check_config: bool,
+    /// Perform one HTTP readiness probe without loading the service configuration.
+    #[arg(long)]
+    healthcheck: Option<String>,
 }
 
 #[tokio::main]
@@ -40,6 +51,10 @@ async fn main() -> Result<()> {
         )
         .init();
     let args = Args::parse();
+    if let Some(url) = args.healthcheck.as_deref() {
+        http_healthcheck(url)?;
+        return Ok(());
+    }
     let mut config = Config::load(&args.config)?;
     if args.check_config {
         println!("configuration valid");
@@ -48,18 +63,32 @@ async fn main() -> Result<()> {
     config
         .ensure_agent_id()
         .context("initializing persistent agent identity")?;
-    let store = Store::open(config.data_dir.clone())?;
+    let store = Store::open_exclusive(config.data_dir.clone())?;
+    let printer_configs = match store.load_printer_configs()? {
+        Some(printers) => printers,
+        None => {
+            store.save_printer_configs(&config.printers)?;
+            config.printers.clone()
+        }
+    };
+    let mut validation = config.clone();
+    validation.printers = printer_configs.clone();
+    validation.validate()?;
     apply_boot_accounting(&config, &store)?;
     let recovered = store.recover_jobs()?;
     let mut queues: HashMap<String, Vec<uuid::Uuid>> = HashMap::new();
     for job in recovered {
         queues.entry(job.printer_id).or_default().push(job.id);
     }
-    for p in &config.printers {
+    for p in &printer_configs {
         store.save_queue(&p.id, queues.get(&p.id).map(Vec::as_slice).unwrap_or(&[]))?;
     }
     let mut workers = HashMap::new();
-    for printer in config.printers.clone() {
+    for printer in printer_configs
+        .iter()
+        .filter(|printer| printer.enabled)
+        .cloned()
+    {
         workers.insert(
             printer.id.clone(),
             worker::spawn(
@@ -72,9 +101,10 @@ async fn main() -> Result<()> {
             ),
         );
     }
-    let workers = Arc::new(workers);
+    let workers = Arc::new(RwLock::new(workers));
+    let printer_configs = Arc::new(RwLock::new(printer_configs));
     let config = Arc::new(config);
-    for w in workers.values() {
+    for w in workers.read().unwrap().values() {
         let w = w.clone();
         tokio::spawn(async move {
             let _ = w.probe().await;
@@ -88,8 +118,8 @@ async fn main() -> Result<()> {
             timer.tick().await;
             loop {
                 timer.tick().await;
-                for w in workers.values() {
-                    let w = w.clone();
+                let current: Vec<_> = workers.read().unwrap().values().cloned().collect();
+                for w in current {
                     tokio::spawn(async move {
                         let _ = w.poll_status().await;
                     });
@@ -105,8 +135,8 @@ async fn main() -> Result<()> {
             timer.tick().await;
             loop {
                 timer.tick().await;
-                for w in workers.values() {
-                    let w = w.clone();
+                let current: Vec<_> = workers.read().unwrap().values().cloned().collect();
+                for w in current {
                     tokio::spawn(async move {
                         let _ = w.probe().await;
                     });
@@ -119,6 +149,7 @@ async fn main() -> Result<()> {
         config: config.clone(),
         store,
         workers,
+        printer_configs,
         started: now(),
         idempotency_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
@@ -127,6 +158,33 @@ async fn main() -> Result<()> {
     axum::serve(listener, api::router(state))
         .with_graceful_shutdown(shutdown())
         .await?;
+    Ok(())
+}
+
+fn http_healthcheck(url: &str) -> Result<()> {
+    let target = url
+        .strip_prefix("http://")
+        .context("healthcheck URL must use http://")?;
+    let (authority, path) = target.split_once('/').unwrap_or((target, ""));
+    let mut stream = TcpStream::connect_timeout(
+        &authority.parse().with_context(|| {
+            format!("healthcheck URL requires an IP socket address: {authority}")
+        })?,
+        Duration::from_secs(3),
+    )?;
+    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(3)))?;
+    write!(
+        stream,
+        "GET /{path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
+    )?;
+    let mut response = [0_u8; 64];
+    let count = stream.read(&mut response)?;
+    anyhow::ensure!(
+        response[..count].starts_with(b"HTTP/1.1 200")
+            || response[..count].starts_with(b"HTTP/1.0 200"),
+        "healthcheck endpoint is not ready"
+    );
     Ok(())
 }
 async fn shutdown() {
@@ -153,7 +211,10 @@ fn apply_boot_accounting(config: &Config, store: &Store) -> Result<()> {
     let previous: Option<String> = crate::persist::read_json(&store.boot_id_path()).ok();
     if previous.as_deref() != Some(boot.trim()) {
         if previous.is_some() && config.host_boot_loss_labels > 0 {
-            for p in &config.printers {
+            let printers = store
+                .load_printer_configs()?
+                .unwrap_or_else(|| config.printers.clone());
+            for p in &printers {
                 if let Some(mut m) = store.load_media(&p.id)? {
                     let count = config.host_boot_loss_labels;
                     let before = m.remaining_labels;

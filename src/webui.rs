@@ -5,27 +5,50 @@ use axum::{
 };
 
 pub fn authorize(config: &Config, headers: &HeaderMap) -> Result<(), ApiResponseError> {
-    let expected = config
-        .admin_token
-        .as_deref()
-        .filter(|token| token.len() >= 24);
-    let supplied = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-    match (expected, supplied) {
-        (Some(expected), Some(supplied))
-            if constant_time_equal(expected.as_bytes(), supplied.as_bytes()) =>
-        {
-            Ok(())
-        }
-        _ => Err(ApiResponseError::new(
+    if authorized(config, headers, Access::Admin) {
+        Ok(())
+    } else {
+        Err(ApiResponseError::new(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
             "Enter the ZebraTamer admin token",
-        )),
+        ))
     }
 }
+
+#[derive(Clone, Copy)]
+pub enum Access {
+    Read,
+    Print,
+    Admin,
+}
+
+pub fn authorized(config: &Config, headers: &HeaderMap, access: Access) -> bool {
+    let supplied = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let Some(supplied) = supplied else {
+        return false;
+    };
+    let candidates = match access {
+        Access::Read => [
+            config.read_token.as_deref(),
+            config.print_token.as_deref(),
+            config.admin_token.as_deref(),
+        ],
+        Access::Print => [
+            config.print_token.as_deref(),
+            config.admin_token.as_deref(),
+            None,
+        ],
+        Access::Admin => [config.admin_token.as_deref(), None, None],
+    };
+    candidates.into_iter().flatten().any(|expected| {
+        expected.len() >= 24 && constant_time_equal(expected.as_bytes(), supplied.as_bytes())
+    })
+}
+
 fn constant_time_equal(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -71,5 +94,34 @@ mod tests {
         assert!(config.validate().is_ok());
         config.admin_token = None;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn v2_tokens_have_separate_scopes_and_admin_grants_every_scope() {
+        let config = Config {
+            read_token: Some("read-token-0123456789012345".into()),
+            print_token: Some("print-token-012345678901234".into()),
+            admin_token: Some("admin-token-012345678901234".into()),
+            ..Config::default()
+        };
+        let headers = |token: &'static str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::AUTHORIZATION,
+                format!("Bearer {token}").parse().unwrap(),
+            );
+            headers
+        };
+        let read = headers("read-token-0123456789012345");
+        assert!(authorized(&config, &read, Access::Read));
+        assert!(!authorized(&config, &read, Access::Print));
+        let print = headers("print-token-012345678901234");
+        assert!(authorized(&config, &print, Access::Read));
+        assert!(authorized(&config, &print, Access::Print));
+        assert!(!authorized(&config, &print, Access::Admin));
+        let admin = headers("admin-token-012345678901234");
+        assert!(authorized(&config, &admin, Access::Read));
+        assert!(authorized(&config, &admin, Access::Print));
+        assert!(authorized(&config, &admin, Access::Admin));
     }
 }

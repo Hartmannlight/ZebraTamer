@@ -1,0 +1,34 @@
+listen = "0.0.0.0:8080"
+data_dir = "/var/lib/zpl-agent"
+storage_mode = "full"
+agent_id = "replace-with-a-stable-site-id"
+webui_enabled = true
+read_token_file = "/etc/zpl-agent/token"
+print_token_file = "/etc/zpl-agent/token"
+admin_token_file = "/etc/zpl-agent/token"
+mdns_enabled = true
+poll_interval_secs = 30
+capability_poll_interval_secs = 3600
+hardware_counters = "disabled"
+
+[[printers]]
+id = "usb-zebra"
+display_name = "USB Zebra"
+enabled = true
+device = "/dev/usb/lp0"
+transport = "char_device"
+driver = "zpl"
+model_hint = "Zebra"
+first_byte_timeout_ms = 1500
+idle_timeout_ms = 500
+write_timeout_ms = 30000
+
+[printers.device_profile]
+resolution_dpi = 203
+max_width_dots = 448
+max_length_dots = 7917
+max_speed_ips = 6
+max_offset_dots = 64
+thermal_transfer = false
+peel_off = false
+cutter = false

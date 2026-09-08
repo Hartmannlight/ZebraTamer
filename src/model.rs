@@ -183,6 +183,7 @@ obs_struct!(CounterSnapshot {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct JobSummary {
     pub queue_depth: u64,
+    pub queue_paused: bool,
     pub open_jobs: u64,
     pub last_job_id: Option<Uuid>,
     pub last_job_state: Option<JobState>,
@@ -237,6 +238,8 @@ pub enum JobState {
     Verifying,
     TransportAccepted,
     CompletedObserved,
+    Held,
+    Cancelled,
     Failed,
     OutcomeUnknown,
 }
@@ -256,6 +259,10 @@ pub struct Job {
     pub idempotency_key: Option<String>,
     pub sha256: Option<String>,
     pub bytes: u64,
+    #[serde(default)]
+    pub bytes_transferred: u64,
+    #[serde(default)]
+    pub delivery_attempts: u32,
     pub payload_path: Option<PathBuf>,
     pub error: Option<String>,
 }

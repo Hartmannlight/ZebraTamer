@@ -21,11 +21,11 @@ if '404' not in result.stderr:
 Path('release/VERSION').write_text(tag + '\n')
 files = [str(path) for path in sorted(Path('release').iterdir()) if path.is_file()]
 command = ['gh', 'release', 'create', tag, '--target', sha, '--title', tag, '--notes',
-           'Validated Linux executables for AMD64, ARM64 and ARMv7. Checksums, source commit, dependency SBOM and GitHub provenance are included. Installation and upgrades remain an operator action.', *files]
+           'Validated Linux executables for AMD64, ARM64 and ARMv7. Native systemd bundles are included for AMD64 and ARM64. Checksums, source commit, dependency SBOM and GitHub provenance are included. Installation and upgrades remain an operator action.', *files]
 if not stable:
     command += ['--prerelease', '--latest=false']
 else:
     command += ['--verify-tag']
 subprocess.run(command, check=True)
 with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
-    summary.write(f'Binary release `{tag}` from `{sha}` published. No container image or deployment.\n')
+    summary.write(f'Binary release `{tag}` from `{sha}` published. Multi-architecture container publication runs in the same workflow; deployment remains an operator action.\n')

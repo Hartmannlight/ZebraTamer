@@ -1,19 +1,34 @@
 use crate::config::PrinterConfig;
 use anyhow::{Context, Result};
 use rusb::{Context as UsbContext, DeviceHandle, Direction, TransferType, UsbContext as _};
+use serde_json::{json, Value};
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
+    net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs},
     os::fd::AsRawFd,
     os::unix::fs::OpenOptionsExt,
     path::Path,
     time::{Duration, Instant},
 };
 
+#[derive(Debug)]
 pub struct QueryResponse {
     pub bytes: Vec<u8>,
     pub duration: Duration,
     pub classification: String,
+}
+
+#[derive(Debug)]
+pub struct DeliveryFailure {
+    pub bytes_written: u64,
+    pub error: anyhow::Error,
+}
+
+impl std::fmt::Display for DeliveryFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.error)
+    }
 }
 
 pub trait PrinterTransport: Send {
@@ -24,14 +39,238 @@ pub trait PrinterTransport: Send {
         first_byte: Duration,
         idle: Duration,
     ) -> Result<QueryResponse>;
-    fn write_file(&mut self, path: &Path) -> Result<u64>;
+    fn write_file(&mut self, path: &Path) -> std::result::Result<u64, DeliveryFailure>;
+}
+
+pub fn discover_usb_printers() -> Result<Vec<Value>> {
+    let usb = UsbContext::new().context("initializing libusb")?;
+    let devices = usb.devices().context("enumerating USB devices")?;
+    let mut found = Vec::new();
+    for device in devices.iter() {
+        let descriptor = match device.device_descriptor() {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let mut printer_class = descriptor.class_code() == 7;
+        for index in 0..descriptor.num_configurations() {
+            let Ok(configuration) = device.config_descriptor(index) else {
+                continue;
+            };
+            if configuration.interfaces().any(|interface| {
+                interface
+                    .descriptors()
+                    .any(|setting| setting.class_code() == 7)
+            }) {
+                printer_class = true;
+                break;
+            }
+        }
+        if !printer_class {
+            continue;
+        }
+        let (manufacturer, product, serial_number) = match device.open() {
+            Ok(handle) => (
+                handle.read_manufacturer_string_ascii(&descriptor).ok(),
+                handle.read_product_string_ascii(&descriptor).ok(),
+                handle.read_serial_number_string_ascii(&descriptor).ok(),
+            ),
+            Err(_) => (None, None, None),
+        };
+        found.push(json!({
+            "vendor_id": descriptor.vendor_id(),
+            "product_id": descriptor.product_id(),
+            "bus_number": device.bus_number(),
+            "address": device.address(),
+            "manufacturer": manufacturer,
+            "product": product,
+            "serial_number": serial_number,
+            "stable_identity": serial_number.is_some()
+        }));
+    }
+    Ok(found)
 }
 
 pub fn open(config: &PrinterConfig) -> Result<Box<dyn PrinterTransport>> {
     match config.transport.as_str() {
         "char_device" => Ok(Box::new(CharDeviceTransport::open(config)?)),
         "usb_bulk" => Ok(Box::new(UsbBulkTransport::open(config)?)),
+        "tcp" => Ok(Box::new(TcpTransport::open(config)?)),
         value => anyhow::bail!("unsupported transport {value:?}"),
+    }
+}
+
+pub struct TcpTransport {
+    addresses: Vec<SocketAddr>,
+    stream: Option<TcpStream>,
+    wrote_since_connect: bool,
+    connect_timeout: Duration,
+    write_timeout: Duration,
+    max_response_bytes: usize,
+}
+
+impl TcpTransport {
+    pub fn open(config: &PrinterConfig) -> Result<Self> {
+        let host = config
+            .tcp_host
+            .as_deref()
+            .context("tcp transport requires tcp_host")?
+            .trim();
+        let addresses: Vec<_> = (host, config.tcp_port)
+            .to_socket_addrs()
+            .with_context(|| format!("resolving TCP printer {host}:{}", config.tcp_port))?
+            .collect();
+        anyhow::ensure!(
+            !addresses.is_empty(),
+            "TCP printer {host}:{} resolved to no addresses",
+            config.tcp_port
+        );
+        let mut transport = Self {
+            addresses,
+            stream: None,
+            wrote_since_connect: false,
+            connect_timeout: Duration::from_millis(config.connect_timeout_ms),
+            write_timeout: Duration::from_millis(config.write_timeout_ms),
+            max_response_bytes: config.max_response_bytes,
+        };
+        transport.connect()?;
+        Ok(transport)
+    }
+
+    fn connect(&mut self) -> Result<()> {
+        let mut last_error = None;
+        for address in &self.addresses {
+            match TcpStream::connect_timeout(address, self.connect_timeout) {
+                Ok(stream) => {
+                    stream
+                        .set_nodelay(true)
+                        .context("configuring TCP printer socket")?;
+                    stream
+                        .set_write_timeout(Some(self.write_timeout))
+                        .context("configuring TCP printer write timeout")?;
+                    self.stream = Some(stream);
+                    self.wrote_since_connect = false;
+                    return Ok(());
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error
+            .map(anyhow::Error::from)
+            .unwrap_or_else(|| anyhow::anyhow!("TCP printer has no resolved address")))
+        .context("connecting to TCP printer")
+    }
+
+    fn stream(&mut self) -> Result<&mut TcpStream> {
+        if self.stream.is_none() {
+            self.connect()?;
+        }
+        Ok(self.stream.as_mut().expect("stream connected"))
+    }
+
+    fn fresh_query_stream(&mut self) -> Result<TcpStream> {
+        if self.stream.is_none() {
+            self.connect()?;
+        }
+        if self.wrote_since_connect {
+            if let Some(old) = self.stream.take() {
+                let _ = old.shutdown(Shutdown::Both);
+            }
+            self.connect()?;
+        }
+        Ok(self.stream.take().expect("stream connected"))
+    }
+}
+
+impl PrinterTransport for TcpTransport {
+    fn write_bytes(&mut self, data: &[u8]) -> Result<()> {
+        self.stream()?
+            .write_all(data)
+            .context("writing TCP printer")?;
+        self.wrote_since_connect = true;
+        Ok(())
+    }
+
+    fn query(
+        &mut self,
+        command: &[u8],
+        first_byte: Duration,
+        idle: Duration,
+    ) -> Result<QueryResponse> {
+        let started = Instant::now();
+        let mut stream = self.fresh_query_stream()?;
+        stream.set_write_timeout(Some(first_byte.max(Duration::from_millis(1))))?;
+        stream
+            .write_all(command)
+            .context("writing TCP printer query")?;
+        stream.set_read_timeout(Some(first_byte.max(Duration::from_millis(1))))?;
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) if bytes.is_empty() => anyhow::bail!("connection_closed_before_response"),
+                Ok(0) => break,
+                Ok(n) => {
+                    anyhow::ensure!(
+                        bytes.len().saturating_add(n) <= self.max_response_bytes,
+                        "response_too_large"
+                    );
+                    bytes.extend_from_slice(&chunk[..n]);
+                    stream.set_read_timeout(Some(idle.max(Duration::from_millis(1))))?;
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) && bytes.is_empty() =>
+                {
+                    anyhow::bail!("first_byte_timeout")
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break
+                }
+                Err(error) => return Err(error).context("reading TCP printer response"),
+            }
+        }
+        let _ = stream.shutdown(Shutdown::Both);
+        let classification = classify(&bytes);
+        Ok(QueryResponse {
+            bytes,
+            duration: started.elapsed(),
+            classification,
+        })
+    }
+
+    fn write_file(&mut self, path: &Path) -> std::result::Result<u64, DeliveryFailure> {
+        let mut source = File::open(path).map_err(|error| DeliveryFailure {
+            bytes_written: 0,
+            error: error.into(),
+        })?;
+        let mut total = 0;
+        let mut chunk = [0u8; 16 * 1024];
+        loop {
+            let read = source.read(&mut chunk).map_err(|error| DeliveryFailure {
+                bytes_written: total,
+                error: error.into(),
+            })?;
+            if read == 0 {
+                break;
+            }
+            let stream = self.stream().map_err(|error| DeliveryFailure {
+                bytes_written: total,
+                error,
+            })?;
+            write_counted(stream, &chunk[..read], &mut total).map_err(|error| DeliveryFailure {
+                bytes_written: total,
+                error: error.context("writing TCP printer"),
+            })?;
+            self.wrote_since_connect = true;
+        }
+        Ok(total)
     }
 }
 
@@ -91,17 +330,31 @@ impl PrinterTransport for CharDeviceTransport {
         })
     }
 
-    fn write_file(&mut self, path: &Path) -> Result<u64> {
-        let mut source = File::open(path)?;
+    fn write_file(&mut self, path: &Path) -> std::result::Result<u64, DeliveryFailure> {
+        let mut source = File::open(path).map_err(|error| DeliveryFailure {
+            bytes_written: 0,
+            error: error.into(),
+        })?;
         let mut total = 0;
         let mut chunk = [0u8; 16 * 1024];
         loop {
-            let n = source.read(&mut chunk)?;
+            let n = source.read(&mut chunk).map_err(|error| DeliveryFailure {
+                bytes_written: total,
+                error: error.into(),
+            })?;
             if n == 0 {
                 break;
             }
-            write_all_nonblocking(&mut self.device, &chunk[..n], self.write_timeout)?;
-            total += n as u64;
+            write_all_nonblocking_counted(
+                &mut self.device,
+                &chunk[..n],
+                self.write_timeout,
+                &mut total,
+            )
+            .map_err(|error| DeliveryFailure {
+                bytes_written: total,
+                error,
+            })?;
         }
         Ok(total)
     }
@@ -296,17 +549,40 @@ impl PrinterTransport for UsbBulkTransport {
         })
     }
 
-    fn write_file(&mut self, path: &Path) -> Result<u64> {
-        let mut source = File::open(path)?;
+    fn write_file(&mut self, path: &Path) -> std::result::Result<u64, DeliveryFailure> {
+        let mut source = File::open(path).map_err(|error| DeliveryFailure {
+            bytes_written: 0,
+            error: error.into(),
+        })?;
         let mut total = 0;
         let mut chunk = [0u8; 16 * 1024];
         loop {
-            let read = source.read(&mut chunk)?;
+            let read = source.read(&mut chunk).map_err(|error| DeliveryFailure {
+                bytes_written: total,
+                error: error.into(),
+            })?;
             if read == 0 {
                 break;
             }
-            self.write_all_bulk(&chunk[..read], self.write_timeout)?;
-            total += read as u64;
+            let mut remaining = &chunk[..read];
+            while !remaining.is_empty() {
+                let written = self
+                    .handle
+                    .write_bulk(self.out_endpoint, remaining, self.write_timeout)
+                    .map_err(|error| DeliveryFailure {
+                        bytes_written: total,
+                        error: anyhow::Error::from(error)
+                            .context("writing USB printer bulk endpoint"),
+                    })?;
+                if written == 0 {
+                    return Err(DeliveryFailure {
+                        bytes_written: total,
+                        error: anyhow::anyhow!("USB printer accepted zero bytes"),
+                    });
+                }
+                total += written as u64;
+                remaining = &remaining[written..];
+            }
         }
         Ok(total)
     }
@@ -344,6 +620,42 @@ fn write_all_nonblocking(file: &mut File, mut data: &[u8], timeout: Duration) ->
     Ok(())
 }
 
+fn write_all_nonblocking_counted(
+    file: &mut File,
+    mut data: &[u8],
+    timeout: Duration,
+    total: &mut u64,
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    while !data.is_empty() {
+        match file.write(data) {
+            Ok(0) => anyhow::bail!("device accepted zero bytes"),
+            Ok(n) => {
+                *total += n as u64;
+                data = &data[n..];
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() || !poll_fd(file.as_raw_fd(), libc::POLLOUT, remaining)? {
+                    anyhow::bail!("write_timeout");
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn write_counted(writer: &mut impl Write, mut data: &[u8], total: &mut u64) -> Result<()> {
+    while !data.is_empty() {
+        let written = writer.write(data)?;
+        anyhow::ensure!(written > 0, "printer accepted zero bytes");
+        *total += written as u64;
+        data = &data[written..];
+    }
+    Ok(())
+}
+
 fn classify(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes).to_ascii_lowercase();
     if text.trim().is_empty() {
@@ -362,6 +674,7 @@ fn classify(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use std::{
+        net::TcpListener,
         os::fd::{FromRawFd, IntoRawFd},
         os::unix::net::UnixStream,
         thread,
@@ -396,5 +709,118 @@ mod tests {
         simulator.join().unwrap();
         assert_eq!(answer.bytes, b"firstsecond");
         assert!(answer.duration >= Duration::from_millis(140));
+    }
+
+    fn tcp_config(address: SocketAddr) -> PrinterConfig {
+        PrinterConfig {
+            id: "network-zebra".into(),
+            transport: "tcp".into(),
+            tcp_host: Some(address.ip().to_string()),
+            tcp_port: address.port(),
+            connect_timeout_ms: 500,
+            first_byte_timeout_ms: 500,
+            idle_timeout_ms: 80,
+            write_timeout_ms: 500,
+            max_response_bytes: 64,
+            ..PrinterConfig::default()
+        }
+    }
+
+    #[test]
+    fn tcp_transport_writes_an_entire_job() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut received = Vec::new();
+            stream.read_to_end(&mut received).unwrap();
+            received
+        });
+        let mut transport = TcpTransport::open(&tcp_config(address)).unwrap();
+        transport.write_bytes(b"^XA^FO1,1^FDtest^FS^XZ").unwrap();
+        transport
+            .stream
+            .take()
+            .unwrap()
+            .shutdown(Shutdown::Both)
+            .unwrap();
+        assert_eq!(server.join().unwrap(), b"^XA^FO1,1^FDtest^FS^XZ");
+    }
+
+    #[test]
+    fn tcp_query_collects_chunks_and_closes_the_query_session() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut command = [0u8; 3];
+            stream.read_exact(&mut command).unwrap();
+            assert_eq!(&command, b"~HS");
+            thread::sleep(Duration::from_millis(20));
+            stream.write_all(b"first").unwrap();
+            thread::sleep(Duration::from_millis(20));
+            stream.write_all(b"second").unwrap();
+            thread::sleep(Duration::from_millis(120));
+        });
+        let mut transport = TcpTransport::open(&tcp_config(address)).unwrap();
+        let response = transport
+            .query(
+                b"~HS",
+                Duration::from_millis(200),
+                Duration::from_millis(60),
+            )
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(response.bytes, b"firstsecond");
+        assert!(transport.stream.is_none());
+    }
+
+    #[test]
+    fn tcp_query_rejects_an_oversize_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut command = [0u8; 3];
+            stream.read_exact(&mut command).unwrap();
+            stream.write_all(&[b'x'; 65]).unwrap();
+        });
+        let mut transport = TcpTransport::open(&tcp_config(address)).unwrap();
+        let error = transport
+            .query(
+                b"~HS",
+                Duration::from_millis(200),
+                Duration::from_millis(60),
+            )
+            .unwrap_err();
+        server.join().unwrap();
+        assert!(error.to_string().contains("response_too_large"));
+    }
+
+    #[test]
+    fn tcp_query_reconnects_for_each_response_session() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for expected in [b"~HS", b"~HI"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut command = [0u8; 3];
+                stream.read_exact(&mut command).unwrap();
+                assert_eq!(&command, expected);
+                stream.write_all(b"ok").unwrap();
+            }
+        });
+        let mut transport = TcpTransport::open(&tcp_config(address)).unwrap();
+        for command in [b"~HS", b"~HI"] {
+            let response = transport
+                .query(
+                    command,
+                    Duration::from_millis(200),
+                    Duration::from_millis(30),
+                )
+                .unwrap();
+            assert_eq!(response.bytes, b"ok");
+        }
+        server.join().unwrap();
     }
 }

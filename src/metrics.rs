@@ -21,7 +21,7 @@ pub fn render(state: &AppState) -> String {
     let free = filesystem_free(state.store.root());
     out.push_str("# TYPE zpl_agent_filesystem_free_bytes gauge\n");
     let _ = writeln!(out, "zpl_agent_filesystem_free_bytes {free}");
-    for (id, w) in state.workers.iter() {
+    for (id, w) in state.workers.read().unwrap().iter() {
         let s = w.snapshot.read().unwrap();
         let p = esc(id);
         metric(

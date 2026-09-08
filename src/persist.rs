@@ -1,17 +1,23 @@
-use crate::model::{now, Event, Job, JobState, MediaLedgerEvent, MediaState};
+use crate::{
+    config::PrinterConfig,
+    model::{now, Event, Job, JobState, MediaLedgerEvent, MediaState},
+};
 use anyhow::{Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use std::{
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Write},
+    os::fd::AsRawFd,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct Store {
     root: PathBuf,
+    _writer_lock: Option<Arc<File>>,
 }
 
 impl Store {
@@ -19,7 +25,30 @@ impl Store {
         for dir in ["jobs", "payloads", "printers", "spool"] {
             fs::create_dir_all(root.join(dir))?;
         }
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            _writer_lock: None,
+        })
+    }
+    pub fn open_exclusive(root: PathBuf) -> Result<Self> {
+        let mut store = Self::open(root)?;
+        let lock_path = store.root.join("writer.lock");
+        let lock = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("opening writer lock {}", lock_path.display()))?;
+        let result = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            anyhow::bail!(
+                "data directory {} is already owned by another ZebraTamer process: {error}",
+                store.root.display()
+            );
+        }
+        store._writer_lock = Some(Arc::new(lock));
+        Ok(store)
     }
     pub fn root(&self) -> &Path {
         &self.root
@@ -46,6 +75,13 @@ impl Store {
         append_ndjson(&self.root.join("jobs.ndjson"), &id)
     }
     pub fn find_job_by_idempotency_key(&self, key: &str, exclude: Uuid) -> Result<Option<Job>> {
+        self.find_job_by_idempotency_key_inner(key, Some(exclude))
+    }
+    pub fn find_job_by_idempotency_key_any(&self, key: &str) -> Result<Option<Job>> {
+        self.find_job_by_idempotency_key_inner(key, None)
+    }
+    pub fn count_active_jobs(&self, printer_id: &str) -> Result<usize> {
+        let mut count = 0;
         for entry in fs::read_dir(self.root.join("jobs"))? {
             let path = entry?.path();
             if path.extension().and_then(|value| value.to_str()) != Some("json") {
@@ -54,7 +90,35 @@ impl Store {
             let Ok(job): Result<Job, _> = read_json(&path) else {
                 continue;
             };
-            if job.id != exclude
+            if job.printer_id == printer_id
+                && matches!(
+                    job.state,
+                    JobState::Receiving
+                        | JobState::Queued
+                        | JobState::Writing
+                        | JobState::Verifying
+                        | JobState::Held
+                )
+            {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+    fn find_job_by_idempotency_key_inner(
+        &self,
+        key: &str,
+        exclude: Option<Uuid>,
+    ) -> Result<Option<Job>> {
+        for entry in fs::read_dir(self.root.join("jobs"))? {
+            let path = entry?.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(job): Result<Job, _> = read_json(&path) else {
+                continue;
+            };
+            if Some(job.id) != exclude
                 && job.sha256.is_some()
                 && job.idempotency_key.as_deref() == Some(key)
             {
@@ -113,6 +177,11 @@ impl Store {
                 queued.push(job);
             }
         }
+        queued.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
         Ok(queued)
     }
     pub fn media_path(&self, printer: &str) -> PathBuf {
@@ -186,6 +255,59 @@ impl Store {
             Ok(vec![])
         }
     }
+    pub fn queue_paused_path(&self, printer: &str) -> PathBuf {
+        self.printer_dir(printer).join("queue-paused.json")
+    }
+    pub fn printer_configs_path(&self) -> PathBuf {
+        self.root.join("printers.json")
+    }
+    pub fn load_printer_configs(&self) -> Result<Option<Vec<PrinterConfig>>> {
+        let path = self.printer_configs_path();
+        if path.exists() {
+            Ok(Some(read_json(&path)?))
+        } else {
+            Ok(None)
+        }
+    }
+    pub fn save_printer_configs(&self, printers: &[PrinterConfig]) -> Result<()> {
+        atomic_json(&self.printer_configs_path(), &printers)
+    }
+    pub fn has_open_jobs(&self, printer_id: &str) -> Result<bool> {
+        for entry in fs::read_dir(self.root.join("jobs"))? {
+            let path = entry?.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(job): Result<Job, _> = read_json(&path) else {
+                continue;
+            };
+            if job.printer_id == printer_id
+                && matches!(
+                    job.state,
+                    JobState::Receiving
+                        | JobState::Queued
+                        | JobState::Writing
+                        | JobState::Verifying
+                        | JobState::Held
+                )
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    pub fn save_queue_paused(&self, printer: &str, paused: bool) -> Result<()> {
+        fs::create_dir_all(self.printer_dir(printer))?;
+        atomic_json(&self.queue_paused_path(printer), &paused)
+    }
+    pub fn load_queue_paused(&self, printer: &str) -> Result<bool> {
+        let path = self.queue_paused_path(printer);
+        if path.exists() {
+            read_json(&path)
+        } else {
+            Ok(false)
+        }
+    }
 }
 
 pub fn atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
@@ -193,16 +315,22 @@ pub fn atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
-    let mut file = OpenOptions::new().create_new(true).write(true).open(&tmp)?;
-    serde_json::to_writer_pretty(&mut file, value)?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
-    drop(file);
-    fs::rename(&tmp, path).with_context(|| format!("atomic rename to {}", path.display()))?;
-    if let Some(parent) = path.parent() {
-        File::open(parent)?.sync_all()?;
+    let result = (|| -> Result<()> {
+        let mut file = OpenOptions::new().create_new(true).write(true).open(&tmp)?;
+        serde_json::to_writer_pretty(&mut file, value)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp, path).with_context(|| format!("atomic rename to {}", path.display()))?;
+        if let Some(parent) = path.parent() {
+            File::open(parent)?.sync_all()?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
     }
-    Ok(())
+    result
 }
 
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
@@ -267,6 +395,7 @@ fn read_ndjson_page<T: DeserializeOwned, F: Fn(&T) -> bool>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::ser::Error as _;
 
     fn job(state: JobState) -> Job {
         Job {
@@ -282,6 +411,8 @@ mod tests {
             idempotency_key: None,
             sha256: None,
             bytes: 42,
+            bytes_transferred: 0,
+            delivery_attempts: 0,
             payload_path: None,
             error: None,
         }
@@ -311,6 +442,36 @@ mod tests {
     }
 
     #[test]
+    fn recovery_uses_stable_creation_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        let mut later = job(JobState::Queued);
+        let mut earlier = job(JobState::Queued);
+        earlier.created_at = now() - chrono::Duration::seconds(1);
+        later.created_at = now();
+        store.save_job(&later).unwrap();
+        store.save_job(&earlier).unwrap();
+        assert_eq!(
+            store
+                .recover_jobs()
+                .unwrap()
+                .into_iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            vec![earlier.id, later.id]
+        );
+    }
+
+    #[test]
+    fn exclusive_store_prevents_a_second_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = Store::open_exclusive(dir.path().into()).unwrap();
+        assert!(Store::open_exclusive(dir.path().into()).is_err());
+        drop(first);
+        assert!(Store::open_exclusive(dir.path().into()).is_ok());
+    }
+
+    #[test]
     fn atomic_json_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
@@ -320,28 +481,93 @@ mod tests {
     }
 
     #[test]
+    fn failed_atomic_write_preserves_previous_state_and_removes_temporary_file() {
+        struct FailingValue;
+        impl Serialize for FailingValue {
+            fn serialize<S>(&self, _serializer: S) -> std::result::Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                Err(S::Error::custom("simulated persistence failure"))
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        atomic_json(&path, &serde_json::json!({"ready":true})).unwrap();
+        assert!(atomic_json(&path, &FailingValue).is_err());
+        let value: Value = read_json(&path).unwrap();
+        assert_eq!(value["ready"], true);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn printer_configs_round_trip_without_static_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        assert!(store.load_printer_configs().unwrap().is_none());
+
+        let printer = PrinterConfig {
+            id: "shipping-zebra".into(),
+            display_name: "Shipping Zebra".into(),
+            transport: "tcp".into(),
+            tcp_host: Some("192.0.2.10".into()),
+            ..PrinterConfig::default()
+        };
+        store.save_printer_configs(&[printer]).unwrap();
+
+        let loaded = store.load_printer_configs().unwrap().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "shipping-zebra");
+        assert_eq!(loaded[0].tcp_host.as_deref(), Some("192.0.2.10"));
+    }
+
+    #[test]
     fn idempotency_lookup_ignores_incomplete_and_excluded_jobs() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().into()).unwrap();
         let mut completed = job(JobState::Queued);
-        completed.idempotency_key = Some("fleet-1".into());
+        completed.idempotency_key = Some("service-job-1".into());
         completed.sha256 = Some("abc".into());
         store.save_job(&completed).unwrap();
         let mut receiving = job(JobState::Receiving);
-        receiving.idempotency_key = Some("fleet-1".into());
+        receiving.idempotency_key = Some("service-job-1".into());
         store.save_job(&receiving).unwrap();
 
         assert_eq!(
             store
-                .find_job_by_idempotency_key("fleet-1", receiving.id)
+                .find_job_by_idempotency_key("service-job-1", receiving.id)
                 .unwrap()
                 .unwrap()
                 .id,
             completed.id
         );
         assert!(store
-            .find_job_by_idempotency_key("fleet-1", completed.id)
+            .find_job_by_idempotency_key("service-job-1", completed.id)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn active_job_count_excludes_terminal_history_and_other_printers() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().into()).unwrap();
+        for state in [JobState::Receiving, JobState::Queued, JobState::Held] {
+            store.save_job(&job(state)).unwrap();
+        }
+        for state in [
+            JobState::TransportAccepted,
+            JobState::CompletedObserved,
+            JobState::Cancelled,
+            JobState::Failed,
+            JobState::OutcomeUnknown,
+        ] {
+            store.save_job(&job(state)).unwrap();
+        }
+        let mut other = job(JobState::Queued);
+        other.printer_id = "p2".into();
+        store.save_job(&other).unwrap();
+        assert_eq!(store.count_active_jobs("p1").unwrap(), 3);
+        assert_eq!(store.count_active_jobs("p2").unwrap(), 1);
     }
 }

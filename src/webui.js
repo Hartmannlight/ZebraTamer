@@ -2,6 +2,8 @@
 const byId = (id) => document.getElementById(id);
 let configuration = null;
 let observation = null;
+let printerConfigs = [];
+let editingPrinter = null;
 let busy = false;
 const controls = [
   ['darkness', 'Druckintensität', '0–30', 'number'],
@@ -38,7 +40,7 @@ async function api(path, {method = 'GET', body} = {}) {
   const response = await fetch(path, {method, headers, body:body === undefined ? undefined : JSON.stringify(body)});
   const result = await response.json().catch(() => null);
   if (!response.ok || result?.error) throw new Error(result?.error?.message || `Anfrage fehlgeschlagen (${response.status})`);
-  return result.data;
+  return result?.data ?? result;
 }
 async function run(action) {
   if (busy) return;
@@ -50,7 +52,7 @@ async function run(action) {
 }
 function renderAvailability() {
   const hasPrinter = Boolean(byId('printer').value);
-  for (const id of ['read-device','load-roll','save-media','reload']) byId(id).disabled = !hasPrinter;
+  for (const id of ['read-device','load-roll','save-media']) byId(id).disabled = !hasPrinter;
   byId('unload-roll').disabled = !configuration?.media?.state;
   byId('save-media').disabled = !configuration?.media?.state;
   byId('save-device').disabled = !observation;
@@ -103,6 +105,55 @@ async function reload() {
   observation = configuration.device.observation;
   renderMedia(); renderDevice();
 }
+function renderPrinterTransport() {
+  const transport = byId('printer-transport').value;
+  for (const field of document.querySelectorAll('.tcp-field')) field.hidden = transport !== 'tcp';
+  for (const field of document.querySelectorAll('.device-field')) field.hidden = transport !== 'char_device';
+  for (const field of document.querySelectorAll('.usb-field')) field.hidden = transport !== 'usb_bulk';
+  byId('printer-host').required = transport === 'tcp';
+  byId('printer-device').required = transport === 'char_device';
+  byId('printer-usb-vendor').required = transport === 'usb_bulk';
+  byId('printer-usb-product').required = transport === 'usb_bulk';
+}
+function editPrinter(printer) {
+  editingPrinter = printer || null;
+  byId('printer-id').value = printer?.id || '';
+  byId('printer-id').readOnly = Boolean(printer);
+  byId('printer-name').value = printer?.display_name || '';
+  byId('printer-enabled').checked = printer?.enabled ?? true;
+  byId('printer-transport').value = printer?.transport || 'tcp';
+  byId('printer-host').value = printer?.tcp_host || '';
+  byId('printer-port').value = printer?.tcp_port || 9100;
+  byId('printer-device').value = printer?.device || '';
+  byId('printer-usb-vendor').value = printer?.usb_vendor_id ?? '';
+  byId('printer-usb-product').value = printer?.usb_product_id ?? '';
+  byId('printer-usb-serial').value = printer?.usb_serial || '';
+  renderPrinterTransport();
+}
+function printerDocument() {
+  const transport = byId('printer-transport').value;
+  return {...(editingPrinter || {}), id:byId('printer-id').value.trim(), display_name:byId('printer-name').value.trim(),
+    enabled:byId('printer-enabled').checked, transport, driver:'zpl',
+    device:transport === 'char_device' ? byId('printer-device').value.trim() : '',
+    tcp_host:transport === 'tcp' ? byId('printer-host').value.trim() : null,
+    tcp_port:Number(byId('printer-port').value || 9100),
+    usb_vendor_id:transport === 'usb_bulk' ? Number(byId('printer-usb-vendor').value) : null,
+    usb_product_id:transport === 'usb_bulk' ? Number(byId('printer-usb-product').value) : null,
+    usb_serial:transport === 'usb_bulk' ? byId('printer-usb-serial').value.trim() || null : null};
+}
+async function refreshPrinters(preferredId = byId('printer').value) {
+  const result = await api('/v2/admin/printers');
+  printerConfigs = result.items || [];
+  const active = printerConfigs.filter(printer => printer.enabled);
+  byId('printer').replaceChildren();
+  for (const printer of active) byId('printer').append(new Option(printer.display_name || printer.id, printer.id));
+  if (active.some(printer => printer.id === preferredId)) byId('printer').value = preferredId;
+  if (!active.length) byId('printer').append(new Option('Keine aktiven Drucker', ''));
+  const selected = printerConfigs.find(printer => printer.id === byId('printer').value);
+  editPrinter(selected || printerConfigs[0]);
+  configuration = null; observation = null; renderMedia(); renderDevice();
+  if (byId('printer').value) await reload();
+}
 function mediaDefinition() {
   const previous = configuration?.media?.state?.media || {shape:'rectangle', preferred_settings:{}, custom:{}};
   return {...previous, display_name:byId('media-name').value.trim(), width_mm:Number(byId('media-width').value),
@@ -110,8 +161,21 @@ function mediaDefinition() {
     tracking:byId('media-tracking').value, print_technology:byId('media-technology').value,
     labels_available_at_load:Number(byId('media-quantity').value), low_warning_threshold:Number(byId('media-warning').value)};
 }
-byId('printer').addEventListener('change', () => { configuration = null; observation = null; renderMedia(); renderDevice(); void run(reload); });
-byId('reload').addEventListener('click', () => void run(reload));
+byId('printer').addEventListener('change', () => { configuration = null; observation = null; editPrinter(printerConfigs.find(printer => printer.id === byId('printer').value)); renderMedia(); renderDevice(); void run(reload); });
+byId('reload').addEventListener('click', () => void run(() => refreshPrinters()));
+byId('token').addEventListener('change', () => void run(() => refreshPrinters()));
+byId('printer-transport').addEventListener('change', renderPrinterTransport);
+byId('new-printer').addEventListener('click', () => editPrinter(null));
+byId('printer-form').addEventListener('submit', event => {
+  event.preventDefault();
+  if (!event.currentTarget.reportValidity()) return;
+  const printer = printerDocument();
+  void run(async () => {
+    await api(`/v2/admin/printers/${encodeURIComponent(printer.id)}`, {method:'POST', body:printer});
+    await refreshPrinters(printer.id);
+    notice(`Drucker „${printer.display_name}“ wurde gespeichert.`, 'success');
+  });
+});
 byId('media-color').addEventListener('input', () => byId('swatch').setAttribute('fill', byId('media-color').value));
 byId('device-tracking').addEventListener('change', renderAvailability);
 byId('read-device').addEventListener('click', () => void run(async () => {
@@ -159,12 +223,12 @@ byId('device-form').addEventListener('submit', event => {
     else notice(result.error || 'Ergebnis unklar. Vor einem erneuten Versuch Gerätewerte auslesen.', 'error');
   });
 });
+editPrinter(null);
 void run(async () => {
-  const printers = await api('/v1/printers');
-  byId('printer').replaceChildren();
-  for (const printer of printers) byId('printer').append(new Option(printer.display_name || printer.id, printer.id));
-  const requested = new URLSearchParams(location.search).get('printer');
-  if (printers.some(printer => printer.id === requested)) byId('printer').value = requested;
-  if (!printers.length) { byId('printer').append(new Option('Keine Drucker konfiguriert', '')); notice('In config.toml ist noch kein Drucker eingetragen.'); }
-  else await reload();
+  const requested = new URLSearchParams(location.search).get('printer') || '';
+  try { await refreshPrinters(requested); }
+  catch (error) {
+    byId('printer').replaceChildren(new Option('Admin-Token eingeben', ''));
+    notice('Admin-Token eingeben und „Ansicht aktualisieren“ wählen, um Drucker zu verwalten.', 'info');
+  }
 });

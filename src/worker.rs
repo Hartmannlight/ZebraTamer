@@ -58,7 +58,18 @@ enum Command {
         capabilities: bool,
         reply: oneshot::Sender<Result<(), String>>,
     },
-    Enqueue(Uuid),
+    Enqueue {
+        id: Uuid,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    SetQueuePaused {
+        paused: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    Cancel {
+        id: Uuid,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 #[derive(Clone)]
@@ -146,10 +157,93 @@ impl WorkerHandle {
             .map_err(|_| "worker_queue_full".to_string())?;
         rx.await.map_err(|_| "worker_stopped".to_string())?
     }
-    pub fn enqueue(&self, id: Uuid) -> Result<(), String> {
+    pub async fn enqueue(&self, id: Uuid) -> Result<(), String> {
+        let (reply, receiver) = oneshot::channel();
         self.tx
-            .try_send(Command::Enqueue(id))
-            .map_err(|_| "worker_queue_full".to_string())
+            .try_send(Command::Enqueue { id, reply })
+            .map_err(|_| "worker_queue_full".to_string())?;
+        receiver.await.map_err(|_| "worker_stopped".to_string())?
+    }
+    pub async fn set_queue_paused(&self, paused: bool) -> Result<(), String> {
+        let (reply, receiver) = oneshot::channel();
+        self.tx
+            .try_send(Command::SetQueuePaused { paused, reply })
+            .map_err(|_| "worker_queue_full".to_string())?;
+        receiver.await.map_err(|_| "worker_stopped".to_string())?
+    }
+    pub async fn cancel(&self, id: Uuid) -> Result<(), String> {
+        let (reply, receiver) = oneshot::channel();
+        self.tx
+            .try_send(Command::Cancel { id, reply })
+            .map_err(|_| "worker_queue_full".to_string())?;
+        receiver.await.map_err(|_| "worker_stopped".to_string())?
+    }
+
+    pub async fn maintenance(&self, action: String) -> Result<serde_json::Value, String> {
+        self.control(move |config, store, snapshot, transport| {
+            let (command, description, estimated_labels) = match action.as_str() {
+                "print-configuration" => (
+                    b"~WC\n".as_slice(),
+                    "Print Zebra configuration label",
+                    1_u64,
+                ),
+                "print-network-configuration" => (
+                    b"~WL\n".as_slice(),
+                    "Print Zebra network configuration label",
+                    1_u64,
+                ),
+                "calibrate-media" => (b"~JC\n".as_slice(), "Calibrate Zebra media sensors", 0_u64),
+                _ => return Err("unsupported_maintenance_action".into()),
+            };
+            ensure_transport(config, transport, snapshot)?;
+            transport
+                .as_mut()
+                .unwrap()
+                .write_bytes(command)
+                .map_err(|error| error.to_string())?;
+            let bytes = command.len() as u64;
+            if estimated_labels > 0 {
+                apply_maintenance_media_loss(config, store, estimated_labels, &action);
+            }
+            Ok(json!({
+                "action": action,
+                "description": description,
+                "moves_media": true,
+                "bytes_transferred": bytes,
+                "state": "transport_accepted",
+                "simulated": false
+            }))
+        })
+        .await
+    }
+}
+
+fn apply_maintenance_media_loss(config: &PrinterConfig, store: &Store, count: u64, action: &str) {
+    if let Ok(Some(mut media)) = store.load_media(&config.id) {
+        let before = media.remaining_labels;
+        media.remaining_labels = before.saturating_sub(count);
+        media.consumed_labels_total = media.consumed_labels_total.saturating_add(count);
+        media.accounting_deficit_labels = media
+            .accounting_deficit_labels
+            .saturating_add(count.saturating_sub(before));
+        media.accounting_confidence = crate::model::AccountingConfidence::Degraded;
+        media.ledger_sequence += 1;
+        media.last_accounting_event_at = Some(now());
+        let event = crate::model::MediaLedgerEvent {
+            sequence: media.ledger_sequence,
+            at: now(),
+            delta: -(count as i64),
+            reason: action.into(),
+            source: "maintenance_estimate".into(),
+            job_id: None,
+            before,
+            after: media.remaining_labels,
+            deficit_after: media.accounting_deficit_labels,
+            hardware_counter_before: None,
+            hardware_counter_after: None,
+        };
+        let _ = store.append_media_ledger(&config.id, &event);
+        let _ = store.save_media(&config.id, &media);
     }
 }
 
@@ -194,23 +288,34 @@ fn run(
     rx: Receiver<Command>,
 ) {
     let mut queue: VecDeque<Uuid> = store.load_queue(&config.id).unwrap_or_default().into();
+    let mut queue_paused = store.load_queue_paused(&config.id).unwrap_or(false);
+    snapshot.write().unwrap().jobs.queue_paused = queue_paused;
     let mut transport: Option<Box<dyn PrinterTransport>> = None;
     let mut ever_connected = false;
     let mut disconnected_at: Option<std::time::Instant> = None;
     loop {
-        if let Some(id) = queue.pop_front() {
-            let _ = store.save_queue(&config.id, queue.make_contiguous());
-            snapshot.write().unwrap().jobs.queue_depth = queue.len() as u64 + 1;
-            process_job(
-                id,
-                &config,
-                &store,
-                options.storage,
-                &snapshot,
-                &mut transport,
-            );
-            snapshot.write().unwrap().jobs.queue_depth = queue.len() as u64;
-            continue;
+        if !queue_paused {
+            if let Some(id) = queue.pop_front() {
+                if store
+                    .save_queue(&config.id, queue.make_contiguous())
+                    .is_err()
+                {
+                    queue.push_front(id);
+                    thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+                snapshot.write().unwrap().jobs.queue_depth = queue.len() as u64 + 1;
+                process_job(
+                    id,
+                    &config,
+                    &store,
+                    options.storage,
+                    &snapshot,
+                    &mut transport,
+                );
+                snapshot.write().unwrap().jobs.queue_depth = queue.len() as u64;
+                continue;
+            }
         }
         match rx.recv() {
             Ok(Command::Control { operation, reply }) => {
@@ -247,10 +352,60 @@ fn run(
                 }
                 let _ = reply.send(result);
             }
-            Ok(Command::Enqueue(id)) => {
-                queue.push_back(id);
-                let _ = store.save_queue(&config.id, queue.make_contiguous());
-                snapshot.write().unwrap().jobs.queue_depth = queue.len() as u64;
+            Ok(Command::Enqueue { id, reply }) => {
+                let mut candidate = queue.clone();
+                candidate.push_back(id);
+                let result = store
+                    .save_queue(&config.id, candidate.make_contiguous())
+                    .map_err(|error| error.to_string());
+                if result.is_ok() {
+                    queue = candidate;
+                    snapshot.write().unwrap().jobs.queue_depth = queue.len() as u64;
+                }
+                let _ = reply.send(result);
+            }
+            Ok(Command::SetQueuePaused { paused, reply }) => {
+                let result = store
+                    .save_queue_paused(&config.id, paused)
+                    .map_err(|error| error.to_string());
+                if result.is_ok() {
+                    queue_paused = paused;
+                    snapshot.write().unwrap().jobs.queue_paused = paused;
+                }
+                let _ = reply.send(result);
+            }
+            Ok(Command::Cancel { id, reply }) => {
+                let result = if let Some(position) = queue.iter().position(|queued| *queued == id) {
+                    match store.load_job(id) {
+                        Ok(mut job) => {
+                            job.state = JobState::Cancelled;
+                            job.updated_at = now();
+                            job.error = None;
+                            match store.save_job(&job) {
+                                Ok(()) => {
+                                    let mut candidate = queue.clone();
+                                    candidate.remove(position);
+                                    match store.save_queue(&config.id, candidate.make_contiguous())
+                                    {
+                                        Ok(()) => {
+                                            queue = candidate;
+                                            emit(&store, "job_cancelled", &config, id, json!({}));
+                                            snapshot.write().unwrap().jobs.queue_depth =
+                                                queue.len() as u64;
+                                            Ok(())
+                                        }
+                                        Err(error) => Err(error.to_string()),
+                                    }
+                                }
+                                Err(error) => Err(error.to_string()),
+                            }
+                        }
+                        Err(error) => Err(error.to_string()),
+                    }
+                } else {
+                    Err("job_is_not_waiting_in_queue".into())
+                };
+                let _ = reply.send(result);
             }
             Err(_) => break,
         }
@@ -333,17 +488,26 @@ fn probe(
                 record_response(snapshot, name, &r.bytes, r.duration, None, r.classification);
                 parse_known(name, &r.bytes, snapshot);
             }
-            Err(e) => record_response(
-                snapshot,
-                name,
-                &[],
-                started.elapsed(),
-                Some(e.to_string()),
-                "transport_error".into(),
-            ),
+            Err(e) => {
+                let error = e.to_string();
+                record_response(
+                    snapshot,
+                    name,
+                    &[],
+                    started.elapsed(),
+                    Some(error.clone()),
+                    "transport_error".into(),
+                );
+                // A printer with no response channel would otherwise occupy its
+                // serialized coordinator for every possible query. One failed
+                // base query is sufficient to report the channel unavailable.
+                if !any {
+                    break;
+                }
+            }
         }
     }
-    if capability_probe {
+    if capability_probe && any {
         for (name, command) in OPTIONAL_QUERIES {
             if *name == "odometer" && hardware_counters == HardwareCounterPolicy::Disabled {
                 snapshot.write().unwrap().capabilities.insert(
@@ -528,23 +692,51 @@ fn process_job(
     let Ok(mut job) = store.load_job(id) else {
         return;
     };
+    if job.state != JobState::Queued {
+        return;
+    }
     job.state = JobState::Writing;
     job.updated_at = now();
-    let _ = store.save_job(&job);
+    if store.save_job(&job).is_err() {
+        return;
+    }
     emit(store, "job_writing", config, id, json!({}));
-    let result = ensure_transport(config, transport, snapshot).and_then(|_| {
-        let path = job
-            .payload_path
-            .as_ref()
-            .ok_or("payload_missing".to_string())?;
-        transport
-            .as_mut()
-            .unwrap()
-            .write_file(path)
-            .map_err(|e| e.to_string())
+    let mut result = Err(crate::transport::DeliveryFailure {
+        bytes_written: 0,
+        error: anyhow::anyhow!("delivery_not_attempted"),
     });
+    for attempt in 0..3 {
+        job.delivery_attempts = job.delivery_attempts.saturating_add(1);
+        let path = match job.payload_path.as_ref() {
+            Some(path) => path,
+            None => {
+                result = Err(crate::transport::DeliveryFailure {
+                    bytes_written: 0,
+                    error: anyhow::anyhow!("payload_missing"),
+                });
+                break;
+            }
+        };
+        result = match ensure_transport(config, transport, snapshot) {
+            Ok(()) => transport.as_mut().unwrap().write_file(path),
+            Err(error) => Err(crate::transport::DeliveryFailure {
+                bytes_written: 0,
+                error: anyhow::anyhow!(error),
+            }),
+        };
+        match &result {
+            Ok(_) => break,
+            Err(failure) if failure.bytes_written > 0 || attempt == 2 => break,
+            Err(_) => {
+                *transport = None;
+                let delay_ms = [100, 500][attempt];
+                thread::sleep(Duration::from_millis(delay_ms));
+            }
+        }
+    }
     match result {
         Ok(bytes) => {
+            job.bytes_transferred = bytes;
             job.state = JobState::TransportAccepted;
             job.updated_at = now();
             let _ = store.save_job(&job);
@@ -563,14 +755,16 @@ fn process_job(
                 job.payload_path = None;
             }
         }
-        Err(e) => {
-            job.state = if job.bytes > 0 {
+        Err(failure) => {
+            job.bytes_transferred = failure.bytes_written;
+            job.state = if failure.bytes_written > 0 {
                 JobState::OutcomeUnknown
             } else {
                 JobState::Failed
             };
-            job.error = Some(e);
+            job.error = Some(failure.to_string());
             job.updated_at = now();
+            *transport = None;
         }
     }
     let _ = store.save_job(&job);

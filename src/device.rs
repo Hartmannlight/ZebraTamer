@@ -412,7 +412,7 @@ pub fn save_configuration(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::QueryResponse;
+    use crate::transport::{DeliveryFailure, QueryResponse};
     use std::{collections::VecDeque, path::Path, time::Duration};
     const RAW: &str = "10.0 DARKNESS\n3 IPS PRINT SPEED\n+0000 LEFT POSITION\n+000 LABEL TOP\n832 PRINT WIDTH\n400 LABEL LENGTH\nTEAR OFF PRINT MODE\nDIRECT-THERMAL PRINT METHOD\nNON-CONTINUOUS MEDIA TYPE\nWEB SENSOR TYPE\n8/MM FULL RESOLUTION\n";
     struct Fake {
@@ -436,7 +436,7 @@ mod tests {
             self.writes.push(String::from_utf8(data.to_vec())?);
             Ok(())
         }
-        fn write_file(&mut self, _: &Path) -> Result<u64> {
+        fn write_file(&mut self, _: &Path) -> std::result::Result<u64, DeliveryFailure> {
             panic!("configuration must not become a print job")
         }
     }
