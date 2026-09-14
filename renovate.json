@@ -3,9 +3,6 @@
   "extends": [
     "github>Hartmannlight/pipeline-toolkit"
   ],
-  "statusCheckNames": [
-    "ci-gate"
-  ],
   "customManagers": [
     {
       "customType": "regex",
