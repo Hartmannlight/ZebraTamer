@@ -6,6 +6,7 @@ ENV ZPL_AGENT_GIT_COMMIT=${ZPL_AGENT_GIT_COMMIT}
 ENV CARGO_PROFILE_RELEASE_LTO=${CARGO_PROFILE_RELEASE_LTO}
 ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=${CARGO_PROFILE_RELEASE_CODEGEN_UNITS}
 RUN apt-get update \
+    && apt-get upgrade --yes \
     && apt-get install --yes --no-install-recommends libusb-1.0-0-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
@@ -19,6 +20,7 @@ COPY --from=build /src/target/release/zpl-agent /zpl-agent
 
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 RUN apt-get update \
+    && apt-get upgrade --yes \
     && apt-get install --yes --no-install-recommends libusb-1.0-0 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system zpl-agent \

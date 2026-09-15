@@ -1,9 +1,4 @@
 name: CI
-on:
-  pull_request:
-    branches: [main]
-  workflow_call:
-  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
@@ -16,167 +11,190 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+        - runner: ubuntu-24.04
+          target: x86_64-unknown-linux-gnu
+        - runner: ubuntu-24.04-arm
+          target: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
     container:
       image: rust:1-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922
     env:
       ZPL_AGENT_GIT_COMMIT: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install simulator runtime
-        run: apt-get update && apt-get install -y --no-install-recommends python3
-      - name: Locked build, lint and native executable tests
-        env:
-          TARGET: ${{ matrix.target }}
-        run: |
-          cargo fmt --check
-          cargo clippy --locked --all-targets -- -D warnings
-          cargo test --locked
-          cargo build --locked --release --target "$TARGET"
-          python3 tests/webui_integration.py "target/$TARGET/release/zpl-agent"
-          mkdir -p artifacts
-          cp "target/$TARGET/release/zpl-agent" "artifacts/zpl-agent-$TARGET"
-          cd artifacts
-          "./zpl-agent-$TARGET" --version
-          sha256sum "zpl-agent-$TARGET" > "zpl-agent-$TARGET.sha256"
-          cd ..
-          bash -n deploy/native/install-local.sh
-          package_dir="native-package-$TARGET"
-          mkdir "$package_dir"
-          cp "target/$TARGET/release/zpl-agent" "$package_dir/zpl-agent"
-          cp deploy/native/install-local.sh deploy/native/zpl-agent.service deploy/native/70-zpl-agent-device.rules deploy/native/README.md "$package_dir/"
-          cp deploy/native/config.usb.toml.example "$package_dir/config.toml"
-          tar -czf "artifacts/zebratamer-native-$TARGET.tar.gz" -C "$package_dir" .
-          (cd artifacts && sha256sum "zebratamer-native-$TARGET.tar.gz" > "zebratamer-native-$TARGET.tar.gz.sha256")
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: binary-${{ matrix.target }}
-          path: artifacts/
-          retention-days: 14
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - name: Install simulator runtime
+      run: apt-get update && apt-get install -y --no-install-recommends python3
+    - name: Locked build, lint and native executable tests
+      env:
+        TARGET: ${{ matrix.target }}
+      run: |
+        cargo fmt --check
+        cargo clippy --locked --all-targets -- -D warnings
+        cargo test --locked
+        cargo build --locked --release --target "$TARGET"
+        python3 tests/webui_integration.py "target/$TARGET/release/zpl-agent"
+        mkdir -p artifacts
+        cp "target/$TARGET/release/zpl-agent" "artifacts/zpl-agent-$TARGET"
+        cd artifacts
+        "./zpl-agent-$TARGET" --version
+        sha256sum "zpl-agent-$TARGET" > "zpl-agent-$TARGET.sha256"
+        cd ..
+        bash -n deploy/native/install-local.sh
+        package_dir="native-package-$TARGET"
+        mkdir "$package_dir"
+        cp "target/$TARGET/release/zpl-agent" "$package_dir/zpl-agent"
+        cp deploy/native/install-local.sh deploy/native/zpl-agent.service deploy/native/70-zpl-agent-device.rules deploy/native/README.md "$package_dir/"
+        cp deploy/native/config.usb.toml.example "$package_dir/config.toml"
+        tar -czf "artifacts/zebratamer-native-$TARGET.tar.gz" -C "$package_dir" .
+        (cd artifacts && sha256sum "zebratamer-native-$TARGET.tar.gz" > "zebratamer-native-$TARGET.tar.gz.sha256")
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: binary-${{ matrix.target }}
+        path: artifacts/
+        retention-days: 14
   armv7:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:
       ZPL_AGENT_GIT_COMMIT: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2
-        with:
-          tool: cross@0.2.5
-      - name: Preserve 32-bit ARM build support
-        run: |
-          cross build --locked --release --target armv7-unknown-linux-gnueabihf
-          mkdir -p artifacts
-          cp target/armv7-unknown-linux-gnueabihf/release/zpl-agent artifacts/zpl-agent-armv7-unknown-linux-gnueabihf
-          cd artifacts
-          sha256sum zpl-agent-armv7-unknown-linux-gnueabihf > zpl-agent-armv7-unknown-linux-gnueabihf.sha256
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: binary-armv7-unknown-linux-gnueabihf
-          path: artifacts/
-          retention-days: 14
-
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d
+      with:
+        tool: cross@0.2.5
+    - name: Preserve 32-bit ARM build support
+      run: |
+        cross build --locked --release --target armv7-unknown-linux-gnueabihf
+        mkdir -p artifacts
+        cp target/armv7-unknown-linux-gnueabihf/release/zpl-agent artifacts/zpl-agent-armv7-unknown-linux-gnueabihf
+        cd artifacts
+        sha256sum zpl-agent-armv7-unknown-linux-gnueabihf > zpl-agent-armv7-unknown-linux-gnueabihf.sha256
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: binary-armv7-unknown-linux-gnueabihf
+        path: artifacts/
+        retention-days: 14
   source-security:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
-        with:
-          # renovate: datasource=github-releases depName=aquasecurity/trivy
-          version: v0.74.0
-          cache: true
-      - name: Scan locked dependencies, configuration and secrets
-        run: |
-          mkdir -p artifacts
-          python3 scripts/security_gate.py --self-test
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567
+      with:
+        version: v0.74.0
+        cache: true
+    - name: Scan locked dependencies, configuration and secrets
+      run: |
+        mkdir -p artifacts
+        python3 scripts/security_gate.py --self-test
 
-          trivy fs --scanners vuln,misconfig,secret --include-dev-deps --skip-dirs .git,.venv,node_modules,target,artifacts --skip-files '**/*.dockerignore' --format json --output "$RUNNER_TEMP/source-scan.json" .
-          python3 scripts/security_gate.py "$RUNNER_TEMP/source-scan.json"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always()
-        with:
-          name: source-security-report
-          path: artifacts/source-scan.json
-          retention-days: 14
+        trivy fs --scanners vuln,misconfig,secret --include-dev-deps --skip-dirs .git,.venv,node_modules,target,artifacts --skip-files '**/*.dockerignore' --format json --output "$RUNNER_TEMP/source-scan.json" .
+        python3 scripts/security_gate.py "$RUNNER_TEMP/source-scan.json"
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      if: always()
+      with:
+        name: source-security-report
+        path: artifacts/source-scan.json
+        retention-days: 14
   container:
     timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
         include:
-          - arch: amd64
-            runner: ubuntu-24.04
-          - arch: arm64
-            runner: ubuntu-24.04-arm
+        - arch: amd64
+          runner: ubuntu-24.04
+        - arch: arm64
+          runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
-      - name: Build exact container candidate
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          file: Dockerfile
-          platforms: linux/${{ matrix.arch }}
-          load: true
-          push: false
-          provenance: false
-          pull: true
-          tags: candidate:print-agent
-          build-args: ZPL_AGENT_GIT_COMMIT=${{ github.sha }}
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-      - name: Runtime smoke test
-        run: python3 scripts/container_smoke.py candidate:print-agent
-      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
-        with:
-          version: v0.74.0
-          cache: true
-      - name: Scan candidate and create SBOM
-        run: |
-          mkdir -p artifacts
-          trivy image --scanners vuln,secret --format json --output scan.json candidate:print-agent
-          python3 scripts/security_gate.py scan.json
-          trivy image --format spdx-json --output artifacts/sbom.spdx.json candidate:print-agent
-          docker save candidate:print-agent -o artifacts/image.tar
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always()
-        with:
-          name: print-agent-security-${{ matrix.arch }}
-          path: artifacts/scan.json
-          if-no-files-found: error
-          retention-days: 14
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: print-agent-candidate-${{ matrix.arch }}
-          path: |
-            artifacts/image.tar
-            artifacts/sbom.spdx.json
-          retention-days: 3
-          compression-level: 0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - name: Build exact container candidate
+      uses: Hartmannlight/pipeline-toolkit/actions/build@abb469f033ee28e00ba1061a47dddfc7d961129a
+      with:
+        context: .
+        file: Dockerfile
+        image: candidate:print-agent
+        platform: linux/${{ matrix.arch }}
+        build-args: ZPL_AGENT_GIT_COMMIT=${{ github.sha }}
+    - name: Runtime smoke test
+      run: python3 scripts/container_smoke.py candidate:print-agent
+    - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567
+      with:
+        version: v0.74.0
+        cache: true
+    - name: Scan candidate and create SBOM
+      run: |
+        mkdir -p artifacts
+        trivy image --scanners vuln,secret --format json --output scan.json candidate:print-agent
+        python3 scripts/security_gate.py scan.json
+        trivy image --format spdx-json --output artifacts/sbom.spdx.json candidate:print-agent
+        docker save candidate:print-agent -o artifacts/image.tar
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      if: always()
+      with:
+        name: print-agent-security-${{ matrix.arch }}
+        path: artifacts/scan.json
+        if-no-files-found: error
+        retention-days: 14
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: print-agent-candidate-${{ matrix.arch }}
+        path: |
+          artifacts/image.tar
+          artifacts/sbom.spdx.json
+        retention-days: 3
+        compression-level: 0
   quality-and-container-gate:
     name: quality-and-binary-gate
     if: always()
-    needs: [native, armv7, source-security, container]
+    needs:
+    - native
+    - armv7
+    - source-security
+    - container
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Require every binary gate
-        env:
-          RESULTS: ${{ toJSON(needs) }}
-        run: |
-          python3 -c 'import json,os; assert all(j["result"] == "success" for j in json.loads(os.environ["RESULTS"]).values())'
+    - name: Require every binary gate
+      env:
+        RESULTS: ${{ toJSON(needs) }}
+      run: |
+        python3 -c 'import json,os; assert all(j["result"] == "success" for j in json.loads(os.environ["RESULTS"]).values())'
+  maintenance-gate:
+    name: ci-gate
+    if: always()
+    needs:
+    - native
+    - armv7
+    - source-security
+    - container
+    - quality-and-container-gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+    - name: Require every check
+      env:
+        RESULTS: ${{ toJSON(needs) }}
+      run: |
+        python3 - <<'PY'
+        import json, os
+        results = json.loads(os.environ['RESULTS'])
+        failed = {name: value['result'] for name, value in results.items() if value['result'] not in ('success',)}
+        if failed:
+            raise SystemExit(str(failed))
+        PY
+'on':
+  pull_request:
+    branches:
+    - main
+  workflow_call: null
+  workflow_dispatch: null
