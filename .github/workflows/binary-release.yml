@@ -91,7 +91,7 @@ jobs:
           subject-name: ghcr.io/hartmannlight/print-agent
           subject-digest: ${{ steps.publish.outputs.digest }}
           push-to-registry: true
-      - uses: actions/attest@60c80190bb1a4fb35e5724ede753db5656412b68 # v4.0.0
+      - uses: actions/attest@c32b4b8b198b65d0bd9d63490e847ff7b53989d4 # v4.0.0
         with:
           subject-name: ghcr.io/hartmannlight/print-agent
           subject-digest: ${{ steps.publish.outputs.digest }}
