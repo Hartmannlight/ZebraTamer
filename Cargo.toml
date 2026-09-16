@@ -10,7 +10,7 @@ anyhow = "1.0.104"
 axum = "0.8.9"
 base64 = "0.22"
 chrono = { version = "0.4.45", features = ["serde"] }
-clap = { version = "4.5", features = ["derive", "env"] }
+clap = { version = "4.6.6", features = ["derive", "env"] }
 futures-util = "0.3"
 libc = "0.2"
 mdns-sd = "0.13"
