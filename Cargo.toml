@@ -11,7 +11,7 @@ axum = "0.8.9"
 base64 = "0.22"
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.6", features = ["derive", "env"] }
-futures-util = "0.3"
+futures-util = "0.3.34"
 libc = "0.2"
 mdns-sd = "0.13"
 rusb = "0.9.4"
