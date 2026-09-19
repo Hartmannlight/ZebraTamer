@@ -17,7 +17,7 @@ jobs:
           target: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
     container:
-      image: rust:1-bookworm@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa
+      image: rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e
     env:
       ZPL_AGENT_GIT_COMMIT: ${{ github.sha }}
     steps:
