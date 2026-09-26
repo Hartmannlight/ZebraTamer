@@ -89,10 +89,9 @@ pub struct SaveRequest {
 }
 
 pub fn revision(value: &impl Serialize) -> String {
-    format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(value).expect("serializable configuration"))
-    )
+    crate::hash::encode_hex(Sha256::digest(
+        serde_json::to_vec(value).expect("serializable configuration"),
+    ))
 }
 
 impl DeviceSettings {
