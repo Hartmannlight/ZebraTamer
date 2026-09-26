@@ -393,7 +393,7 @@ async fn create_job(
     job.updated_at = now();
     job.label_count = label_count;
     job.label_count_source = label_count_source;
-    job.sha256 = Some(format!("{:x}", sha.finalize()));
+    job.sha256 = Some(crate::hash::encode_hex(sha.finalize()));
     if job.bytes == 0 {
         job.bytes = bytes;
     }

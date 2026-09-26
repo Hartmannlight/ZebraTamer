@@ -125,7 +125,7 @@ pub fn prepare_job(
             total_source_bytes <= MAX_JOB_BYTES,
             "job exceeds the maximum decoded size"
         );
-        let actual_hash = format!("{:x}", Sha256::digest(&source));
+        let actual_hash = crate::hash::encode_hex(Sha256::digest(&source));
         ensure!(
             actual_hash.eq_ignore_ascii_case(&artifact.sha256),
             "artifact sha256 mismatch"
@@ -175,7 +175,7 @@ pub fn prepare_job(
         options: &request.options,
         artifacts: canonical_artifacts,
     };
-    let request_hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&canonical)?));
+    let request_hash = crate::hash::encode_hex(Sha256::digest(serde_json::to_vec(&canonical)?));
     Ok(PreparedJob {
         bytes,
         request_hash,
@@ -209,7 +209,7 @@ mod tests {
     fn artifact(mime_type: &str, source: &[u8]) -> Artifact {
         Artifact {
             mime_type: mime_type.into(),
-            sha256: format!("{:x}", Sha256::digest(source)),
+            sha256: crate::hash::encode_hex(Sha256::digest(source)),
             data_base64: STANDARD.encode(source),
         }
     }
