@@ -87,7 +87,7 @@ jobs:
         persist-credentials: false
     - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567
       with:
-        version: v0.74.0
+        version: v0.75.0
         cache: true
     - name: Scan locked dependencies, configuration and secrets
       run: |
@@ -129,7 +129,7 @@ jobs:
       run: python3 scripts/container_smoke.py candidate:print-agent
     - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567
       with:
-        version: v0.74.0
+        version: v0.75.0
         cache: true
     - name: Scan candidate and create SBOM
       run: |
